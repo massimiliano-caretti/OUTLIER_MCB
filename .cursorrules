@@ -1,0 +1,32 @@
+OUTLIER_MCB — standing routine (Cursor & any AI assistant)
+
+This repo uses OUTLIER_MCB: an assumption-negation + falsification engine for honest invention/discovery.
+
+WHEN THE USER ASKS FOR SOMETHING NEW / NOVEL / INVENT / DISCOVER IN ENGLISH OR ITALIAN, USE THE LIBRARY — always, by default.
+QUANDO L'UTENTE CHIEDE QUALCOSA DI NUOVO / ORIGINALE / INVENTATO / SCOPERTO IN INGLESE O ITALIANO, USA LA LIBRERIA.
+
+  python -c "import OUTLIER_MCB as m; print(m.assistant_brief('''<the request>'''))"
+
+For continuous use after the first activation, use the compact per-turn router:
+
+  python -m OUTLIER_MCB route --problem "<the request>" --json
+
+If activate=false, answer normally. If activate=true, follow entrypoint/next_call and report the broken
+assumption, world-test/death-gate, claim-ladder status, and novelty_scope.
+Se activate=false, rispondi normalmente. Se activate=true, segui entrypoint/next_call e riporta assunzione
+rotta, world-test/death-gate, stato della claim ladder e novelty_scope.
+
+Then obey the brief. For the full loop:
+  import OUTLIER_MCB as m
+  m.explore("<request>", evaluator=<objective>, prior_art_provider=<online>, llm=<model>)   # invention
+  m.explore("<claim>", math_claim="x**2+y**2>=2*x*y", math_variables={"x":(-5,5),"y":(-5,5)})  # theorems → z3/lean
+
+RULES (non-negotiable):
+1. Never answer a novelty/invention request from memory — run the library first.
+2. Break a hidden assumption and name it; breaking none = INSIDE_THE_BOX (not an answer).
+3. Settle EXTERNALLY (data / repo tests / z3 / lean) — never self-certify.
+4. Report novelty_scope (LOCAL_ONLY / INCOMPLETE_ONLINE_SEARCH / ONLINE_PRIOR_ART_CHECKED).
+5. Never say "absolute novelty" / "new theorem" / "never seen" without formal proof + online prior-art + a passing verifier.
+6. Math: FORMALLY_PROVED only when z3/lean confirms; no proof => conjecture, not theorem.
+
+The spark is yours; the rigor is the machine's — every candidate must be able to DIE on a world-test.

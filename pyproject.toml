@@ -1,0 +1,60 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "OUTLIER_MCB"
+dynamic = ["version"]
+description = "A domain-agnostic assumption-negation + falsification engine for grounded, rigorous creativity in coding assistants."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { text = "MIT" }
+authors = [{ name = "Massimiliano Caretti", email = "massimiliano.caretti@gmail.com" }]
+keywords = [
+    "creativity", "falsification", "assumption-negation", "invention", "discovery",
+    "novelty-detection", "prior-art", "hypothesis-testing", "scientific-method", "epistemics",
+    "llm", "ai-agents", "agentic", "agent-tools", "reasoning", "llm-tools",
+    "program-synthesis", "symbolic-regression", "quality-diversity", "map-elites", "open-endedness",
+    "automated-discovery", "active-learning", "claim-verification", "domain-agnostic",
+    "research-tools", "zero-dependencies", "typed", "python",
+]
+classifiers = [
+    # Beta, not Production/Stable: the core (assumption-negation + falsification) is mature, but the
+    # discovery layer (online prior art, math discovery, the autonomous inventor) is experimental.
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest>=7"]
+
+[project.urls]
+Homepage = "https://github.com/massimiliano-caretti/OUTLIER_MCB"
+Repository = "https://github.com/massimiliano-caretti/OUTLIER_MCB"
+Documentation = "https://github.com/massimiliano-caretti/OUTLIER_MCB#readme"
+Changelog = "https://github.com/massimiliano-caretti/OUTLIER_MCB/blob/main/CHANGELOG.md"
+Issues = "https://github.com/massimiliano-caretti/OUTLIER_MCB/issues"
+
+[project.scripts]
+OUTLIER_MCB = "OUTLIER_MCB.cli:main"
+
+[tool.setuptools.dynamic]
+version = { attr = "OUTLIER_MCB.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["OUTLIER_MCB*"]
+
+[tool.setuptools.package-data]
+OUTLIER_MCB = ["py.typed", "activate.md"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]

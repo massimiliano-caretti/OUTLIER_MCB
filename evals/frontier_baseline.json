@@ -1,0 +1,48 @@
+{
+  "frontier": {
+    "toy_gap_problem": {
+      "H": {
+        "direction": "decrease",
+        "evidence_status": "NUMERIC_VERIFIED",
+        "metric": "H",
+        "note": "H<=14",
+        "value": 14.0
+      }
+    }
+  },
+  "history": [
+    {
+      "accepted": true,
+      "direction": "decrease",
+      "evidence_status": "NUMERIC_VERIFIED",
+      "metric": "H",
+      "note": "H<=30",
+      "outcome": "ACCEPTED",
+      "problem": "toy_gap_problem",
+      "reason": "certified (NUMERIC_VERIFIED) and strictly improves None → 30",
+      "value": 30.0
+    },
+    {
+      "accepted": true,
+      "direction": "decrease",
+      "evidence_status": "NUMERIC_VERIFIED",
+      "metric": "H",
+      "note": "H<=20",
+      "outcome": "ACCEPTED",
+      "problem": "toy_gap_problem",
+      "reason": "certified (NUMERIC_VERIFIED) and strictly improves 30.0 → 20",
+      "value": 20.0
+    },
+    {
+      "accepted": true,
+      "direction": "decrease",
+      "evidence_status": "NUMERIC_VERIFIED",
+      "metric": "H",
+      "note": "H<=14",
+      "outcome": "ACCEPTED",
+      "problem": "toy_gap_problem",
+      "reason": "certified (NUMERIC_VERIFIED) and strictly improves 20.0 → 14",
+      "value": 14.0
+    }
+  ]
+}

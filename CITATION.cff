@@ -1,0 +1,35 @@
+cff-version: 1.2.0
+message: "If you use OUTLIER_MCB in your work, please cite it as below."
+title: "OUTLIER_MCB: a domain-agnostic assumption-negation and falsification engine for disciplined, honest creativity"
+abstract: >-
+  OUTLIER_MCB is a pure-Python, zero-dependency engine that helps an assistant or a
+  researcher invent and discover new structure without overstating it. Given a request for
+  something new, it names the hidden assumptions the average answer relies on, negates them
+  along structural axes, attaches a refutation test to each candidate, gates every strong
+  claim to the evidence it has actually reached, and settles ideas against external resolvers
+  (repository tests, SMT/CAS provers, data). It never certifies novelty by naming and reports
+  the absence of a prior-art match as an incomplete search, not as proof.
+type: software
+authors:
+  - family-names: Caretti
+    given-names: Massimiliano
+    email: massimiliano.caretti@gmail.com
+version: 2.1.0
+license: MIT
+repository-code: "https://github.com/massimiliano-caretti/OUTLIER_MCB"
+url: "https://github.com/massimiliano-caretti/OUTLIER_MCB"
+keywords:
+  - creativity
+  - falsification
+  - assumption-negation
+  - invention
+  - discovery
+  - novelty-detection
+  - prior-art
+  - scientific-method
+  - epistemics
+  - large-language-models
+  - agentic
+  - quality-diversity
+  - symbolic-regression
+  - automated-discovery
