@@ -37,6 +37,8 @@ REPRESENTATION_THEOREMS: Dict[str, RepresentationTheorem] = {
         citation="Zaheer et al. 2017",
         closure="DEEPSETS",
         family_keywords=["permutation-invariant pool", "permutation invariant pool", "perm-invariant",
+                         "permutation-invariant pooling", "permutation invariant pooling", "permutation-invariant",
+                         "permutation invariant",
                          "perm invariant", "set pooling", "set readout", "mil readout", "mil pooling",
                          "aggregation function", "pooling operator", "bag readout",
                          "instance pooling", "multiple instance"]),
@@ -84,6 +86,19 @@ def theorem_brief(problem: str, pack=None) -> Optional[Dict]:
                   f"this family does not exist — the closure is universal. Generate ONLY along the exits the "
                   f"theorem leaves open: {', '.join(th.exits)}."),
     }
+
+
+def theorem_branches(problem: str, pack=None) -> List[Dict]:
+    """The representation-theorem twin of barriers.barrier_branches: one branch per admissible exit of the theorem
+    closing the request's family (an empty list when no theorem governs it)."""
+    th = find_theorem_for(problem)
+    if th is None:
+        return []
+    return [{"barrier": th.name, "citation": th.citation, "exit": ex, "dead_route": th.statement,
+             "world_test": (f"exhibit an input where every member of the closure ({th.closure}) gives the SAME output "
+                            f"and the exit separates the cases the task needs."),
+             "killed_if": "the proposal is still expressible inside the closure (closure_membership → INSIDE_THE_BOX)."}
+            for ex in th.exits]
 
 
 # ── FIX E: a small corpus of CLASSICAL results; a proved statement matching one is NOT a new theorem ──

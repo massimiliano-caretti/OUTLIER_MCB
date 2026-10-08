@@ -26,7 +26,9 @@ never sufficient. / Passo 0: scrivi prima le tue risposte di default; ogni idea 
 
 Use `--memory .outlier_mcb/failure_memory.json` (or `OUTLIER_MCB_MEMORY`) on `route` / `brief` / `creative` /
 `judge`: negative verdicts persist, the spent break is demoted, and the brief lists the rejected ideas. In the LLM
-loop a candidate's `baseline_patch` (best known family) must leave its test RED — else it is NOT separated.
+loop a candidate's `baseline_patch` (best known family) must leave its test RED — else it is NOT separated; its
+test must also KILL mutants of the lines the idea changed. A `[theorem exits]` block in the brief = the only
+admissible directions left by a proven obstruction: generate along them.
 
 ## AUTO-ACTIVATION (do this without being asked)
 

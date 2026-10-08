@@ -15,6 +15,7 @@ repair of the single broken field), Novelty Search / prior-art gate (a graded ve
 rationale+world-test+patch-intent, never "absolute novelty"). Fully opt-in: no `llm`, no behaviour change.
 """
 from __future__ import annotations
+import os
 import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -430,7 +431,7 @@ def _previous(patch: str, label: str, limit: int = 2000) -> str:
 # ── transactional materialisation (§2: snapshot → RED → impl → GREEN → rollback unless kept) ──
 def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: int, llm=None,
                  max_test_repairs: int = 0, max_impl_repairs: int = 0, keep_failed: bool = False,
-                 dry_run: bool = False, telemetry: Optional[Dict] = None) -> Dict:
+                 dry_run: bool = False, telemetry: Optional[Dict] = None, mutation_budget: int = 4) -> Dict:
     """Apply test_patch (RED — proof it catches a real gap), then implementation_patch (GREEN wins), inside a
     transaction that ROLLS BACK on any failure (unless keep_failed). Returns evidence flags + verifier tail.
     Never escapes the repo (paths validated before any write)."""
@@ -499,8 +500,19 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
 
         # 3) apply the implementation, run GREEN (with bounded repair)
         impl = cd.get("implementation_patch")
+        before: Dict[str, Optional[str]] = {}               # pre-implementation text of each targeted file (mutants)
+
+        def _remember(pl):
+            for rel in pl.paths():
+                if rel not in before:
+                    try:
+                        with open(os.path.join(repo_root, rel), encoding="utf-8") as fh:
+                            before[rel] = fh.read()
+                    except (OSError, UnicodeDecodeError):
+                        before[rel] = None
         if impl:
             iplan = parse_unified_diff(impl)
+            _remember(iplan)
             if validate_patch_paths(iplan, repo_root)[0] and tx.apply(iplan)["applied"]:
                 result2 = runner.run(cmd, cwd=repo_root, timeout=timeout, env=env)
                 ev["green_final"] = classify_test_outcome(result2) == "GREEN"; ev["tail"] = result2.tail()
@@ -512,10 +524,19 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
                                           + _previous(impl, "implementation_patch (applied, did not go GREEN)"))
                     impl = fixed
                     fiplan = parse_unified_diff(fixed)
+                    _remember(fiplan)
                     if not validate_patch_paths(fiplan, repo_root)[0] or not tx.apply(fiplan)["applied"]:
                         break
                     result2 = runner.run(cmd, cwd=repo_root, timeout=timeout, env=env)
                     ev["green_final"] = classify_test_outcome(result2) == "GREEN"; ev["tail"] = result2.tail()
+
+        # 3b) MUTATION CHECK: does the test pin the implementation, or would it pass a broken one too? Mutate only
+        # the lines the implementation changed; every mutated file is restored before the next step.
+        if ev["green_final"] and mutation_budget > 0 and before:
+            from .mutation import mutation_check
+            mc = mutation_check(repo_root, before, cmd, runner=runner, timeout=timeout, env=env,
+                                max_mutants=mutation_budget)
+            ev["mutation_score"], ev["mutants"], ev["mutant_survivors"] = mc["score"], mc["mutants"], mc["survivors"]
 
         # 4) keep on GREEN (so a real win lands in the repo), else roll back unless keep_failed
         if dry_run:
@@ -556,9 +577,47 @@ def _run_baseline(baseline: str, repo_root: str, cmd, *, runner: CommandRunner, 
         btx.rollback()
 
 
+def _repo_block(problem: str, repo_root: Optional[str], max_modules: int = 8, max_chars: int = 1500) -> str:
+    """REAL symbols for the prompt: without them the model writes tests against imagined names and most candidates
+    die as RED_COLLECTION (an import error proves nothing). Modules are ranked by the problem's impact surface,
+    then by word overlap with their names/symbols; each line is an importable path the test can actually use."""
+    if not repo_root:
+        return ""
+    try:
+        from .repo_semantics import repo_world_model, impact_surface
+        model = repo_world_model(repo_root)
+    except Exception:
+        return ""
+    api = model.public_api()
+    if not api:
+        return ""
+    surface = impact_surface(problem, model)
+    request_words = {"invent", "new", "novel", "way", "better", "with", "the", "and", "for", "design", "create",
+                     "inventa", "nuovo", "nuova", "modo", "migliore", "per", "con"}   # the ASK, not the subject
+    toks = {w for w in "".join(c if c.isalnum() else " " for c in (problem or "").lower()).split()
+            if len(w) > 2 and w not in request_words}
+
+    def overlap(mod: str) -> int:
+        parts = set(mod.lower().replace("_", ".").split(".")) | {
+            p for s in api[mod] for p in s.lower().split("_")}
+        return len(parts & toks)
+    defining = {model.symbol_to_module[x] for x in surface["symbols"] if x in model.symbol_to_module}
+    # word overlap first (+2 for the module DEFINING a symbol the problem names); the caller expansion of the
+    # impact surface is too broad to lead — it only breaks ties.
+    ranked = sorted(api, key=lambda m: (-(overlap(m) + 2 * (m in defining)), m not in surface["modules"], m))
+    ranked = ranked[:max_modules]
+    lines = ["REPO SYMBOLS YOU CAN IMPORT (write tests against THESE real names — an import error is worthless):"]
+    lines += [f"  from {m} import {', '.join(api[m][:8])}" for m in ranked]
+    untested = model.modules_without_tests()[:6]
+    if untested:
+        lines.append("MODULES WITH NO TEST YET (a RED test here is real new evidence): " + ", ".join(untested))
+    out = "\n".join(lines)
+    return out if len(out) <= max_chars else out[:max_chars].rsplit("\n", 1)[0]
+
+
 # ── the prompt (every round carries archive elites + failures + verifier tail + prior-art + forbidden cells) ──
 def _build_prompt(problem, pack, archive, failures, verifier_tail, prior_art_warn, forbidden, samples,
-                  memory_block: str = "") -> str:
+                  memory_block: str = "", repo_block: str = "") -> str:
     asms = ", ".join(a.name for a in breakable(pack)) or "—"
     fams = ", ".join(pack.known_families[:8]) or "—"
     elites = "; ".join(f"{c.name} (q={q})" for _c, q, c in archive.elites()[:5]) or "none yet"
@@ -580,6 +639,8 @@ def _build_prompt(problem, pack, archive, failures, verifier_tail, prior_art_war
         L.append(f"PRIOR-ART WARNINGS: {prior_art_warn}")
     if memory_block:                                 # #8: cues routed from the creative memories (router)
         L.append(memory_block)
+    if repo_block:                                   # the real, importable symbols of the target repo
+        L.append(repo_block)
     L += [f"\nReturn {samples} DIFFERENT candidates as a JSON array. {_SCHEMA_HINT}",
           "Each must break a DIFFERENT assumption and include a failing test_patch (real assertion, not a "
           "broken import) plus an implementation_patch that changes real source — not one that skips the test.",
@@ -682,7 +743,7 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                          keep_failed: bool = False, dry_run: bool = False, timeout: int = 60,
                          weights: Optional[Dict[str, float]] = None,
                          max_per_assumption: int = 3, max_per_cell: int = 2,
-                         memory_router=None) -> LLMSearchResult:
+                         memory_router=None, mutation_budget: int = 4) -> LLMSearchResult:
     """Run the LLM-in-the-loop search. The LLM is called once per round (budget // samples_per_round rounds);
     each candidate is prior-art gated, diversity gated, optionally MATERIALIZED (test RED → patch GREEN, in a
     rollback-safe transaction) and scored by execution into readable components. Bounded repair fixes a broken
@@ -709,6 +770,7 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
     failures: List[str] = []
     verifier_tail = ""
     rounds = max(1, budget // max(1, samples_per_round))
+    repo_block = _repo_block(problem, repo.root if (repo is not None and getattr(repo, "grounded", False)) else None)
 
     for _r in range(rounds):
         div.reset_round()
@@ -721,7 +783,8 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
             except Exception:
                 mem_block = ""
         prompt = _build_prompt(problem, pack, archive, failures, verifier_tail, prior_warn,
-                               div.forbidden_assumptions, samples_per_round, memory_block=mem_block)
+                               div.forbidden_assumptions, samples_per_round, memory_block=mem_block,
+                               repo_block=repo_block)
         completions = llm.complete(prompt, system=_SYSTEM, n=samples_per_round)
         res.llm_call_count += 1
         for comp in completions:
@@ -785,11 +848,18 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                 if materialize and repo is not None and repo.grounded and cd.get("test_patch"):
                     mat = _materialize(cd, repo.root, runner=runner, timeout=timeout, llm=llm,
                                        max_test_repairs=max_test_repairs, max_impl_repairs=max_impl_repairs,
-                                       keep_failed=keep_failed, dry_run=dry_run, telemetry=tel)
+                                       keep_failed=keep_failed, dry_run=dry_run, telemetry=tel,
+                                       mutation_budget=mutation_budget)
                     ev.update(materialized=mat["materialized"], red_first=mat["red_first"],
                               red_kind=mat["red_kind"], green_final=mat["green_final"],
                               beats_baseline=mat.get("beats_baseline"), baseline_kind=mat.get("baseline_kind"),
                               baseline_family=str(cd.get("baseline_family") or ""))
+                    if mat.get("mutation_score") is not None:
+                        # executed evidence outranks the keyword heuristic: a test that lets the idea's own
+                        # mutants pass does not pin the idea, however specific it looks.
+                        ev["test_quality_keyword"] = ev["test_quality"]
+                        ev["mutation_score"], ev["mutant_survivors"] = mat["mutation_score"], mat.get("mutant_survivors", [])
+                        ev["test_quality"] = round(0.3 * ev["test_quality"] + 0.7 * mat["mutation_score"], 3)
                     res.baseline_checked_count += int(mat.get("beats_baseline") is not None)
                     res.baseline_separated_count += int(bool(mat.get("beats_baseline")))
                     res.materialized_count += int(mat["materialized"])

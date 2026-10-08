@@ -379,6 +379,8 @@ __toolbox__ = [
     "MODE_VERDICTS",
     # persistent failure memory: negative verdicts demote the spent break in the next brief
     "FailureStore", "resolve_failure_store", "NEGATIVE_VERDICTS",
+    # theorems as generators · mutation-tested test quality
+    "barrier_branches", "relevant_barriers", "theorem_branches", "mutation_check", "code_mutants", "changed_lines",
     # routing evidence
     "select_pack", "route_pack", "RouteDecision", "pack_quality",
     # kernel + scoring
@@ -594,6 +596,9 @@ __toolbox__ = [
 ]
 
 # ── anti-mode: the model's own declared default answers become the request-specific box to leave ──
+from .mutation import mutation_check, mutants as code_mutants, changed_lines
+from .barriers import barrier_branches, relevant_barriers
+from .theorems import theorem_branches
 from .failure_feedback import FailureStore, resolve_store as resolve_failure_store, NEGATIVE_VERDICTS
 from .mode_box import (declare_mode, mode_pack, mode_distance, mode_brief, anti_mode_protocol, ModeMap,
                        ModeDistance, MODE_VERDICTS)

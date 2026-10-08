@@ -64,6 +64,10 @@ python -m OUTLIER_MCB judge --problem "<request>" --idea "<your idea>" --answer 
 
 In the LLM loop, every candidate also carries a `baseline_patch` (the best KNOWN family on the same code): its
 test must stay RED under the baseline and go GREEN under the idea, otherwise it is "not separated" and rejected.
+After GREEN, the lines the idea changed are MUTATED (return None, flipped comparison, shifted constant, …): a test
+that lets those mutants pass does not pin the idea and loses most of its test-quality credit. The prompt lists the
+repo's REAL importable symbols — write tests against them. When a no-go/representation theorem governs the request,
+the brief lists its admissible EXITS as branches: generate along them, never along the dead route.
 
 ## The non-negotiable rules (why this exists)
 

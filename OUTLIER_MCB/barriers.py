@@ -105,6 +105,7 @@ class Barrier:
     detect: Callable                  # (text) -> DEAD_BY_BARRIER | NOT_BLOCKED | UNKNOWN
     exits: List[str] = field(default_factory=list)   # the ONLY openings the theorem leaves
     domains: List[str] = field(default_factory=list)  # pack names it applies to ([] = all)
+    topics: List[str] = field(default_factory=list)   # request-level signals: the PROBLEM lives under this barrier
 
 
 @dataclass
@@ -132,7 +133,9 @@ BARRIER_REGISTRY: Dict[str, Barrier] = {
         exits=["inject a parity-BREAKING observable (automorphic / bilinear / exponential-sum input)",
                "add automorphic / spectral input (escape sieve-only)",
                "change the objective to a finite certified gap bound (Maynard–Tao bounded gaps — NOT blocked)"],
-        domains=["number_theory"]),
+        domains=["number_theory"],
+        topics=["twin prime", "twin primes", "primi gemelli", "prime gap", "prime gaps", "gap between primes",
+                "polignac", "sieve", "crivello", "parity problem"]),
     "THERMODYNAMICS_2ND_LAW": Barrier(
         name="THERMODYNAMICS_2ND_LAW",
         theorem="no net work/energy can be extracted from a CLOSED/isolated system over a cycle (1st law: energy "
@@ -142,8 +145,40 @@ BARRIER_REGISTRY: Dict[str, Barrier] = {
         exits=["make the system OPEN — draw from an external reservoir / energy source",
                "exploit a temperature/chemical GRADIENT (a non-equilibrium drive), not a closed cycle",
                "change the objective: efficiency BELOW the Carnot bound, not above unity"],
-        domains=["physics", "engineering"]),
+        domains=["physics", "engineering"],
+        topics=["perpetual motion", "moto perpetuo", "perpetuum mobile", "over-unity", "overunity", "free energy",
+                "free-energy device", "energia gratis", "energia infinita", "infinite energy", "self-powered",
+                "generate energy from nothing", "efficiency above 100"]),
 }
+
+
+def relevant_barriers(problem: str, pack=None) -> List[Barrier]:
+    """The barriers a REQUEST lives under: its text names a barrier topic (whatever pack it routed to — a twin-prime
+    request routed to the generic pack is still under the parity problem), or, inside the barrier's own domain,
+    the request itself already describes the dead route or one of its exits."""
+    low = _FREE_ENERGY_POTENTIAL.sub(" ", str(problem or "").lower())
+    pack_name = getattr(pack, "name", "") if pack is not None else ""
+    out = []
+    for b in BARRIER_REGISTRY.values():
+        in_domain = not b.domains or (pack_name in b.domains)
+        if _has(low, b.topics) or (in_domain and pack_name and b.detect(problem or "") != UNKNOWN):
+            out.append(b)
+    return out
+
+
+def barrier_branches(problem: str, pack=None) -> List[Dict]:
+    """Turn a no-go theorem from a KILLER into a GENERATOR: one branch per admissible exit of every barrier the
+    request lives under, each with its forced world-test and kill condition. These are the non-obvious directions
+    the literature leaves open — the dead route is named so it is never re-proposed."""
+    out = []
+    for b in relevant_barriers(problem, pack):
+        for ex in b.exits:
+            out.append({"barrier": b.name, "citation": b.citation, "exit": ex, "dead_route": b.theorem,
+                        "world_test": (f"show the known route hits the «{b.name}» ceiling on a concrete instance, and "
+                                       f"that taking this exit produces a measurable result it cannot."),
+                        "killed_if": ("the proposal, written out, reduces back to the dead route "
+                                      "(barrier_membership → DEAD_BY_BARRIER) or never uses the exit it claims.")})
+    return out
 
 
 def barrier_membership(idea, pack=None) -> Optional[BarrierVerdict]:

@@ -131,6 +131,17 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
         except ResearchError:
             pass            # no usable sources → fall through to the honest elicitation scaffold below
     out = [pf["instructions"]]
+    # no-go / representation theorems as GENERATORS: the exits the literature leaves open are the most
+    # non-obvious directions there are — listed before anything else, with the dead route named.
+    from .barriers import barrier_branches
+    from .theorems import theorem_branches
+    exits = barrier_branches(prompt, pack or get_pack(pf["pack"])) + theorem_branches(prompt)
+    if exits:
+        out.append("\n[theorem exits] A proven obstruction governs this request — its dead route is closed; generate "
+                   "ALONG these exits:")
+        for e in exits:
+            out.append(f"  ⇢ [{e['barrier']}] {e['exit']}")
+            out.append(f"      world-test: {e['world_test']}  ·  killed if: {e['killed_if']}")
     if pf.get("elicitation_required"):
         from .elicit import elicit_pack
         e = elicit_pack(prompt)
@@ -147,7 +158,6 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
             out.append("      first-principles structure and extrapolate beyond every known example.")
     else:
         from . import kernel
-        from .pack import get_pack
         p = pack or get_pack(pf["pack"])
         from .failure_feedback import resolve_store
         store = resolve_store(memory)
