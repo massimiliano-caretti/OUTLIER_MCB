@@ -47,7 +47,9 @@ def _gp_script(box, claim_gp, hyp_gps):
     for (n, lo, hi) in box:
         lines.append(f"{indent}for({n}={lo}, {hi},")
         indent += "  "
-    assign = ", ".join(f'"{n}=", {n}' for (n, _, _) in box)
+    # GP's print() concatenates its arguments with NO separator — emit an explicit ", " between variables so a
+    # multi-variable counterexample parses back correctly (not {'x': '0y=0'}).
+    assign = ', ", ", '.join(f'"{n}=", {n}' for (n, _, _) in box)
     lines.append(f'{indent}if(({guard}) && !({claim_gp}), print("CE ", {assign}); found=1; break({len(box)}))')
     for _ in box:
         indent = indent[:-2]
@@ -61,6 +63,10 @@ def pari_backend(timeout_ms: int = 5000):
     timeout_s = max(0.1, timeout_ms / 1000.0)
 
     def prove(conj):
+        if (conj.domain or "real") != "int":
+            return "TOOL_LIMIT_UNKNOWN", None, ("PARI enumerates INTEGER points only; this claim ranges over the "
+                                               "reals (domain != 'int'), so an integer scan is not a proof of it — "
+                                               "UNKNOWN (declare domain='int' for a finite integer claim).")
         box = _finite_int_box(conj.variables)
         if box is None:
             return "TOOL_LIMIT_UNKNOWN", None, ("PARI computes over a FINITE integer box only; this domain is "

@@ -8,12 +8,13 @@ clearly matches: either nothing scores, or the top two packs are too close to ca
 from __future__ import annotations
 from typing import Dict, Optional
 
-from .pack import select_pack, pack_scores, DomainPack
+from .pack import select_pack, pack_scores, keyword_hits, DomainPack
 
 
 def domain_confidence(prompt: str, pack: DomainPack) -> int:
-    """How many of a pack's keywords the prompt contains (a quick, repo-blind confidence proxy)."""
-    return sum(1 for k in pack.keywords if k in (prompt or "").lower())
+    """How many of a pack's keywords the prompt contains (a quick, repo-blind confidence proxy). Word-anchored,
+    exactly like routing (pack.keyword_hits) — so the guard and the router never disagree on what 'matched'."""
+    return keyword_hits(pack.keywords, prompt)
 
 
 def guard_response(prompt: str, min_hits: int = 1, margin: int = 1, repo=None) -> Dict:
@@ -31,8 +32,9 @@ def guard_response(prompt: str, min_hits: int = 1, margin: int = 1, repo=None) -
                 "message": ("no registered domain pack matches this prompt. Do NOT answer from a canned domain — "
                             "call elicit_pack(prompt) to BUILD the domain's assumptions first, then falsify.")}
     if top[1] - second < margin:
+        runner_up = scores[1][0] if len(scores) > 1 else "—"     # a single registered pack has no runner-up
         return {"ok": False, "pack": pack.name, "confidence": hits, "margin": top[1] - second,
-                "message": (f"routing is AMBIGUOUS: '{top[0]}' and '{scores[1][0]}' score nearly the same "
+                "message": (f"routing is AMBIGUOUS: '{top[0]}' and '{runner_up}' score nearly the same "
                             f"({top[1]} vs {second}). Do not guess — confirm the domain or call elicit_pack(prompt).")}
     return {"ok": True, "pack": pack.name, "confidence": hits, "margin": top[1] - second,
             "message": f"pack '{pack.name}' matches (score={hits}, margin={top[1] - second}); kernel may proceed."}

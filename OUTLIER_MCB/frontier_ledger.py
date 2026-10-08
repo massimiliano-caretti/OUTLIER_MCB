@@ -15,6 +15,7 @@ is proved — that honesty is the engine, not the brake.
 """
 from __future__ import annotations
 import json
+import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -112,14 +113,22 @@ class FrontierLedger:
         status = _evidence_status(evidence)
         current = self.best(problem, metric)
         prior_dir = self.direction_of(problem, metric)
+        try:
+            fval = float(value)
+        except (TypeError, ValueError):
+            fval = float("nan")
 
         def _record(outcome: str, accepted: bool, reason: str) -> ClaimResult:
-            self.history.append(FrontierClaim(problem=problem, metric=metric, value=float(value),
+            self.history.append(FrontierClaim(problem=problem, metric=metric, value=fval,
                                               direction=direction, evidence_status=status, accepted=accepted,
                                               outcome=outcome, reason=reason, note=note))
             return ClaimResult(outcome=outcome, accepted=accepted, reason=reason, previous=current,
-                               value=float(value) if accepted else current)
+                               value=fval if accepted else current)
 
+        # BUGFIX: a non-numeric value used to crash, and a NaN/inf FIRST claim was ACCEPTED — after which no
+        # comparison can ever succeed (x < nan is always False), freezing the frontier forever.
+        if not math.isfinite(fval):
+            return _record(INVALID_CLAIM, False, f"value must be a finite number, got {value!r}")
         if direction not in DIRECTIONS:
             return _record(INVALID_CLAIM, False, f"direction must be one of {DIRECTIONS}, got '{direction}'")
         if prior_dir is not None and direction != prior_dir:
@@ -129,13 +138,13 @@ class FrontierLedger:
             return _record(UNCERTIFIED_REJECTED, False,
                            f"no external certificate (status '{status or '∅'}' ∉ {CERTIFIED_STATUSES}); "
                            "the engine never self-certifies a frontier advance")
-        if not _strictly_improves(direction, float(value), current):
+        if not _strictly_improves(direction, fval, current):
             return _record(REGRESSION_REJECTED, False,
                            f"{value} does not strictly improve the frontier ({current}) in direction '{direction}' "
                            "— never regress")
         # ACCEPT: move the frontier toward the objective
         self.frontier.setdefault(problem, {})[metric] = _Record(metric=metric, direction=direction,
-                                                                value=float(value), evidence_status=status, note=note)
+                                                                value=fval, evidence_status=status, note=note)
         return _record(ACCEPTED, True, f"certified ({status}) and strictly improves {current} → {value}")
 
     # ── deterministic persistence (sorted JSON) ──

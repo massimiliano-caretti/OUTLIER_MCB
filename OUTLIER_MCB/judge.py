@@ -29,8 +29,10 @@ def _rank_assumptions(idea: str, pack):
              if len(w) > 3 and w not in _STOP}
     scored = []
     for a in pack.assumptions:
-        text = f"{a.name} {a.description} {a.if_false}".lower()
-        scored.append((a.name, sum(1 for w in words if w in text)))
+        # word-PREFIX match ('measure' → 'measured'), not raw substring: 'form' used to score inside 'uniform',
+        # 'less' inside 'stateless', 'rate' inside 'separate' — phantom evidence that could flip the anchor.
+        toks = "".join(c if c.isalnum() else " " for c in f"{a.name} {a.description} {a.if_false}".lower()).split()
+        scored.append((a.name, sum(1 for w in words if any(t.startswith(w) for t in toks))))
     return sorted(scored, key=lambda kv: -kv[1])
 
 
@@ -72,10 +74,12 @@ class Judgment:
     repo_grounding: object = None    # #7: AST impact surface + file-anchored falsifiers (when repo_path given)
     closure: object = None           # FIX A: universal-closure membership when the pack declares closures
     barrier: object = None           # F2: a BarrierVerdict when a no-go theorem kills the idea's route (DEAD_BY_BARRIER)
+    mode: object = None              # a ModeDistance vs the model's own declared default answers (when mode= is given)
     def markdown(self) -> str:
         head = [f"# Judgment — «{self.idea}»",
                 f"**verdict: {self.verdict}** · maturity: {self.status} · verifiability: {self.verifiability}",
                 f"breaks: {self.broken_assumption or '— (unmapped)'}  (confidence {self.confidence})",
+                (f"vs declared mode: {self.mode.verdict} — {self.mode.reason}" if self.mode is not None else ""),
                 (f"ambiguous between: {', '.join(self.ambiguous_assumptions)}" if self.ambiguous_assumptions else ""),
                 f"**next step:** {self.next_step}"]
         body = "\n".join(x for x in head if x) + "\n\n" + self.dossier.markdown()
@@ -88,26 +92,56 @@ class Judgment:
 
 def judge(idea: str, prompt: str = "", pack=None, repo_path: Optional[str] = None,
           assumption: str = "", breaks: Optional[List[str]] = None, provider=None,
-          first_principles: bool = False) -> Judgment:
+          first_principles: bool = False, mode=None) -> Judgment:
     """Run the full rigor on a free-text idea the assistant proposes. Returns a single, actionable verdict.
 
     `first_principles=True` additionally attaches a FirstPrinciplesCritique — falsifiable objections derived
     from the claim's own logic (universals, comparatives, scale, robustness), which the pack-bound reviewer
-    cannot raise on an axis it does not model. Opt-in: off by default, so the standard verdict is unchanged."""
+    cannot raise on an axis it does not model. Opt-in: off by default, so the standard verdict is unchanged.
+
+    `mode` = the model's own declared typical answers (a list of strings, or a ModeMap from `declare_mode`). Then
+    the idea is also gated against THAT box: a MODE_ECHO / NEAR_MODE (a variant of the default answer) is
+    INSIDE_THE_BOX, and — with no explicit pack — the request-specific mode pack is used, so a TAIL idea is
+    mapped to the shared feature it actually drops instead of to a generic assumption."""
     from .pack import select_pack, get_pack
     from .kernel import no_solution_before_assumption
     from .dossier import dossier as build_dossier
     from .repo_world import compile_world_test
     from .verifier import verifiability_class
 
+    idea = idea if isinstance(idea, str) else ("" if idea is None else str(idea))   # None/non-str must not crash
     the_pack = pack if pack is not None else (select_pack(prompt or idea)[0])
     if isinstance(the_pack, str):
         the_pack = get_pack(the_pack)
+    mode_map, mode_d = None, None
+    if mode is not None:
+        from .mode_box import ModeMap, declare_mode, mode_distance, mode_pack
+        mode_map = mode if isinstance(mode, ModeMap) else declare_mode(prompt or idea, list(mode))
+        mode_d = mode_distance(idea, mode_map)
+        if pack is None and mode_map.shared:
+            the_pack = mode_pack(mode_map, base_pack=the_pack)
+
+    if assumption:
+        # the caller override is treated as CERTAIN (confidence 1.0) — so it must name a REAL assumption of this
+        # pack. A typo used to silently yield INSIDE_THE_BOX "breaking" a non-existent assumption at confidence
+        # 1.0; resolve case-insensitively, else raise (errors.py: an unknown assumption is a genuine fault).
+        names = {a.name.lower(): a.name for a in the_pack.assumptions}
+        if assumption.lower() not in names:
+            from .errors import AssumptionNotFoundError
+            raise AssumptionNotFoundError(f"assumption '{assumption}' is not in pack '{the_pack.name}'; "
+                                          f"available: {sorted(names.values())}")
+        assumption = names[assumption.lower()]
 
     inferred, confidence, ambiguous, ranking = _infer(idea, the_pack)
     asm = assumption or inferred or ""
     if assumption:
         confidence, ambiguous = 1.0, []          # caller override is certain
+    elif mode_d is not None and mode_d.verdict == "TAIL" and mode_d.broken and not asm.startswith("relies_on_"):
+        # the declared mode says WHICH shared feature the idea drops — direct evidence, stronger than word overlap
+        from .mode_box import _slug
+        cand_asm = f"relies_on_{_slug(mode_d.broken[0])}"
+        if cand_asm in the_pack.dimension_of:
+            asm, confidence, ambiguous = cand_asm, max(confidence, 0.5), []
     axis = the_pack.dimension_of.get(asm, "") if asm else ""
     has_new_output = any(h in idea.lower() for h in _NEW_OUTPUT_HINTS)
     broke = [axis] if axis else (breaks or [])
@@ -186,6 +220,13 @@ def judge(idea: str, prompt: str = "", pack=None, repo_path: Optional[str] = Non
         next_step = (f"DEAD BY BARRIER «{barrier.barrier}» ({barrier.citation}): {barrier.reason} "
                      f"Do NOT pursue this route — take an admissible EXIT: {', '.join(barrier.exits)}.")
 
+    # anti-mode gate: a variant of the model's own declared default answer is inside the box however it is worded.
+    if mode_d is not None and mode_d.verdict in ("MODE_ECHO", "NEAR_MODE") and verdict != "DEAD_BY_BARRIER":
+        verdict = "INSIDE_THE_BOX"
+        next_step = (f"{mode_d.verdict}: {mode_d.reason}. This is a variant of your own default answer — drop a "
+                     f"shared feature of the mode ({', '.join(mode_d.kept or mode_map.shared_surface()[:3])}) "
+                     "and move far from every typical answer before proposing it.")
+
     terms = sorted({w for w in "".join(ch if ch.isalnum() else " " for ch in idea.lower()).split()
                     if len(w) > 3 and w not in _STOP})
 
@@ -235,4 +276,4 @@ def judge(idea: str, prompt: str = "", pack=None, repo_path: Optional[str] = Non
                     evidence_terms=terms[:8],
                     requires_human_confirmation=bool(not assumption and (confidence < 0.34 or ambiguous)),
                     novelty=novelty, first_principles=fp, testability_request=testability,
-                    repo_grounding=repo_grounding, closure=closure, barrier=barrier)
+                    repo_grounding=repo_grounding, closure=closure, barrier=barrier, mode=mode_d)

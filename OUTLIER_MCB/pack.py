@@ -16,7 +16,9 @@ A pack declares:
   world_factory   — optional: axis -> an EXECUTABLE world builder (None for non-ML domains)
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Callable, Dict, List, Optional, Tuple
 from .core import Assumption
 from .assumption_graph import RELATIONS
@@ -91,6 +93,35 @@ def _ensure_loaded() -> None:
         from . import packs  # noqa: F401  (registers all built-in packs on import)
 
 
+# ── keyword matching: WORD-anchored, inflection-tolerant (not raw substring) ──────────────────────────────
+# A keyword hits only when it starts at a word boundary and is followed by at most a short inflectional tail
+# (≤2 letters: 'gap'→'gaps', 'twin'→'twins', 'load balanc'→'load balancer') or a common derivational suffix
+# ('-ing', '-ment', '-ation', …). Raw `k in text` let 'primi' fire on 'comprimi'/'primitive', 'gap' on
+# 'singapore', 'twin' on 'twinkle', 'proof' on 'waterproof' — routing Italian/English prompts to the wrong
+# pack. Unicode-aware (\w covers à/è/ì), so Italian keywords ('parità', "dell'energia") match too.
+_KW_TAIL = r"(?:\w{0,2}|ing|ings|ment|ments|ation|ations|ity|ities|ies|ers)?(?!\w)"
+
+
+@lru_cache(maxsize=4096)
+def _kw_regex(keyword: str):
+    k = (keyword or "").lower().strip()
+    if not k:
+        return None
+    return re.compile(r"(?<!\w)" + re.escape(k) + (_KW_TAIL if k[-1].isalnum() else ""))
+
+
+def keyword_hit(keyword: str, text: str) -> bool:
+    """True iff `keyword` occurs in (already-lowercased) `text` as a word / word-stem — see _KW_TAIL."""
+    rx = _kw_regex(keyword)
+    return bool(rx is not None and rx.search(text or ""))
+
+
+def keyword_hits(keywords, text: str) -> int:
+    """How many of `keywords` hit `text` (lower-cased here) — the routing score of one pack."""
+    t = (text or "").lower()
+    return sum(1 for k in keywords if keyword_hit(k, t))
+
+
 # programming languages that should bias routing toward the software ("coding") pack.
 _SOFTWARE_LANGS = {"python", "javascript", "typescript", "go", "rust", "java", "ruby", "c++", "c"}
 
@@ -100,12 +131,13 @@ def pack_scores(prompt: str, repo=None) -> List[Tuple[str, int]]:
     real RepoContext is given. Returns [(pack_name, score)] sorted best-first — the routing evidence."""
     _ensure_loaded()
     t = (prompt or "").lower()
-    boost_software = bool(repo is not None and (repo.primary_language() in _SOFTWARE_LANGS))
+    boost_software = bool(repo is not None
+                          and getattr(repo, "primary_language", lambda: None)() in _SOFTWARE_LANGS)
     scores = []
     for name, p in REGISTRY.items():
         if name == "generic":
             continue
-        hits = sum(1 for k in p.keywords if k in t) + (1 if (boost_software and name == "coding") else 0)
+        hits = keyword_hits(p.keywords, t) + (1 if (boost_software and name == "coding") else 0)
         scores.append((name, hits))
     return sorted(scores, key=lambda kv: -kv[1])
 
@@ -154,6 +186,12 @@ def route_pack(prompt: str, repo=None, pack: Optional[DomainPack] = None) -> Rou
     top, second = ranked[0][1], (ranked[1][1] if len(ranked) > 1 else 0)
     margin = top - second
     ambiguous = margin < 1
-    return RouteDecision(ranked[0][0], scores, top, margin, ambiguous,
-                         ("clear lead over the runner-up" if not ambiguous else "ambiguous: top two are near-tied"),
+    reason = "clear lead over the runner-up" if not ambiguous else "ambiguous: top two are near-tied"
+    # a lead made ONLY of the repo-language boost (zero keyword evidence) is not a domain match: in any Python
+    # repo "invent a new way to bake bread" used to route CONFIDENTLY to the software pack's box. Keep the pick
+    # (backward compatible) but flag it ambiguous so the guard elicits instead of answering from a wrong box.
+    if boost and not ambiguous and keyword_hits(REGISTRY[ranked[0][0]].keywords, prompt) == 0:
+        ambiguous = True
+        reason = "only the repo-language boost matched (no keyword evidence for this domain) — confirm or elicit"
+    return RouteDecision(ranked[0][0], scores, top, margin, ambiguous, reason,
                          repo_language_boost=boost, source=("repo_boost" if boost else "keyword"))

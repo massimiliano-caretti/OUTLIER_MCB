@@ -74,7 +74,15 @@ class NoveltyArchive:
         """The archive's current average sparseness — the dynamic novelty threshold for admission."""
         if len(self.descriptors) < 2:
             return 0.0
-        vals = [self.calculate_novelty(d) for d in self.descriptors]
+        # BUGFIX: a member's sparseness must be measured against the OTHER members — including itself put a
+        # 0-distance 'neighbour' in every k-NN set, roughly halving the bar on a small archive (two disjoint
+        # descriptors scored 0.5, not 1.0) and admitting candidates LESS sparse than the archive already is.
+        kk = max(1, self.k)
+        vals = []
+        for i, d in enumerate(self.descriptors):
+            dists = sorted(_distance(d, o) for j, o in enumerate(self.descriptors) if j != i)
+            nearest = dists[:min(kk, len(dists))]
+            vals.append(sum(nearest) / len(nearest))
         return round(sum(vals) / len(vals), 3)
 
     def add_if_novel(self, candidate_bd: Set[str], threshold: float = None) -> bool:

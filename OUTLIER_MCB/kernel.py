@@ -12,6 +12,7 @@ theorem, or a domain it has never seen (via an elicited pack). Public operations
 Collaborators: assumption_graph (the graph type), core.negate, instruction_emitter, types.PreflightResult.
 """
 from __future__ import annotations
+import re
 from typing import Dict, List, Optional
 
 from .assumption_graph import AssumptionGraph
@@ -21,8 +22,17 @@ from .instruction_emitter import emit_assistant_instructions
 from .types import PreflightResult
 
 # prompt words signalling a request to exceed the current ceiling (used by the missing-info heuristic).
+# Kept as the readable list; the MATCHER is _CEILING_RX below — word-anchored, so 'new' fires at the end of a
+# prompt ("make it new") but not inside 'renew'/'news', and Italian requests (the contract is EN+IT) count too.
 _CEILING = ["invent", "new ", "novel", "original", "breakthrough", "beat ", "outperform",
             "never seen", "ceiling", "limited", "more model", "another model", "no collage"]
+_CEILING_RX = re.compile(r"(?<!\w)(?:" + "|".join((
+    r"(?:re)?invent\w*", r"new(?:er|est)?", r"novel(?:ty)?", r"original\w*", r"breakthroughs?", r"beat(?:s|ing)?",
+    r"outperform\w*", r"never\s+seen", r"ceiling", r"limited", r"more\s+models?", r"another\s+model",
+    r"no\s+collage",
+    # Italian
+    r"invenzion[ei]", r"nuov[oaie]", r"supera\w*", r"mai\s+vist[oaie]", r"tetto", r"limitat[oaie]",
+    r"(?:più|altri|un\s+altro)\s+modell[oi]", r"niente\s+collage")) + r")(?!\w)")
 # the fields a proposed solution must declare before it can leave INSIDE_THE_BOX.
 REQUIRED_FIELDS = ("breaks_assumption", "family_that_cannot", "new_output", "new_data", "world_test")
 _STANCES = ["conservative", "radical", "hybrid", "contrarian"]
@@ -32,9 +42,11 @@ _STANCES = ["conservative", "radical", "hybrid", "contrarian"]
 def _graph_fingerprint(pack) -> tuple:
     """A cheap content fingerprint of everything graph_of reads — so the cache invalidates the moment the
     pack's structure changes (a mutation or an _extend_pack copy) and never returns a stale graph."""
-    return (tuple(a.name for a in pack.assumptions),
+    # the FULL relation content (not just len(pack.relations)): editing an edge in place — same count — must
+    # invalidate the cache; likewise the node payload (description/falsifier) the graph copies into each node.
+    return (tuple((a.name, a.description, a.falsifier) for a in pack.assumptions),
             tuple(sorted(pack.dimension_of.items())),
-            tuple(sorted(pack.box_assumptions)), len(pack.relations))
+            tuple(sorted(pack.box_assumptions)), tuple(tuple(r) for r in pack.relations))
 
 
 def graph_of(pack, prompt: str = "") -> AssumptionGraph:
@@ -50,7 +62,10 @@ def graph_of(pack, prompt: str = "") -> AssumptionGraph:
                       "dimension": pack.dimension_of.get(a.name),
                       "breakable": bool(pack.dimension_of.get(a.name)), "falsifier": a.falsifier}
              for a in pack.assumptions}
-    edges = [e for e in pack.relations if e[0] in nodes]
+    # normalise every edge to (src, rel, dst, note): validate() accepts a 3-tuple (no note) or extra fields, and
+    # every graph consumer unpacks exactly four — a note-less elicited relation used to crash creative().
+    edges = [(e[0], e[1], e[2], (e[3] if len(e) > 3 else "")) for e in pack.relations
+             if len(e) >= 3 and e[0] in nodes]
     g = AssumptionGraph(nodes=nodes, edges=edges)
     try:
         pack._graph_cache = (fp, g)
@@ -69,9 +84,13 @@ def _failure_count(pack, name: str) -> int:
     An assumption that has already failed often is an obvious, worn break; a rarely-failed one reaches
     further. Empty failure_memory (the built-in packs) ⇒ 0 for every assumption ⇒ ranking is unchanged."""
     fm = pack.failure_memory or {}
+    # whole-IDENTIFIER match ('_' counts as part of the name): substring `name in k` charged an assumption 'x_y' for a
+    # dead 'w_x_y' idea and 'x' for any key containing it — mis-ranking the rarity term.
+    rx = re.compile(r"(?<![A-Za-z0-9_])" + re.escape(name) + r"(?![A-Za-z0-9_])")
     return sum(1 for k, v in fm.items()
-               if str(v.get("status", "")).startswith("DEAD")
-               and (name in k or name in str(v.get("assumption", "")) or name in str(v.get("axis", ""))))
+               if isinstance(v, dict) and str(v.get("status", "")).startswith("DEAD")
+               and (rx.search(str(k)) or rx.search(str(v.get("assumption", "")))
+                    or rx.search(str(v.get("axis", "")))))
 
 
 def _ranked_breakable(pack, g: AssumptionGraph) -> List[str]:
@@ -124,7 +143,7 @@ def _missing_info(prompt: str, pack, g: AssumptionGraph, signals: Optional[Dict]
     if not needed and pack.info_kinds:                      # fall back to the pack's headline info kinds
         needed = [{"kind": k, "why": v, "criticality": _criticality(k, pack, g)}
                   for k, v in list(pack.info_kinds.items())[:2]]
-    ceiling = any(p in (prompt or "").lower() for p in _CEILING)
+    ceiling = bool(_CEILING_RX.search((prompt or "").lower()))
     flagged = bool((signals or {}).get("label_limited") or (signals or {}).get("errors_track_suspect_labels"))
     insufficient = bool(flagged or (ceiling and needed))
     reason = ("the problem is information-limited: a new combination of known mechanisms searches the SAME "

@@ -113,9 +113,14 @@ def discovery_confidence(structure: float = 0.0, prior_art_distance: float = 0.0
     So a paraphrase (high semantic_novelty, no prior-art scope, no verification) stays LOW, and only an idea
     that is novel-on-checked-sources AND materialized AND verified can approach 1.0. Returns the number, the
     caps that fired, and the components — never a bare figure."""
-    comp = {"structure": round(float(structure), 3), "prior_art_distance": round(float(prior_art_distance), 3),
-            "semantic_novelty": round(float(semantic_novelty), 3),
-            "materialization": round(float(materialization), 3), "verification": round(float(verification), 3)}
+    # BUGFIX: components are clamped to [0,1] (NaN → 0) so an out-of-range input cannot push the score past 1.0
+    # (5.0 everywhere used to return 5.0) nor a negative one drag it below the caps' meaning.
+    def _unit(x) -> float:
+        v = float(x or 0.0)
+        return round(min(1.0, max(0.0, v)), 3) if v == v else 0.0
+    comp = {"structure": _unit(structure), "prior_art_distance": _unit(prior_art_distance),
+            "semantic_novelty": _unit(semantic_novelty),
+            "materialization": _unit(materialization), "verification": _unit(verification)}
     base = (0.25 * comp["structure"] + 0.20 * comp["prior_art_distance"] + 0.15 * comp["semantic_novelty"]
             + 0.20 * comp["materialization"] + 0.20 * comp["verification"])
     conf = base

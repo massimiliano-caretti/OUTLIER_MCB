@@ -63,7 +63,10 @@ _edges = [
 PACK = DomainPack(
     name="causal",
     keywords=["causal inference", "confounder", "confounding", "cause and effect", "causal effect",
-              "causal graph", "does x cause", "spurious correlation", "back-door", "intervention effect"],
+              "causal graph", "does x cause", "spurious correlation", "back-door", "intervention effect",
+              # Italian (the assistant contract is bilingual EN+IT)
+              "inferenza causale", "confondente", "confondenti", "causa ed effetto", "causa-effetto",
+              "effetto causale", "grafo causale", "correlazione spuria", "causalità"],
     box_name="reading an observational correlation as a direct causal effect",
     assumptions=A,
     relations=_edges,

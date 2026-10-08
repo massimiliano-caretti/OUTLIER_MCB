@@ -12,6 +12,7 @@ a real function in a real module, so the idea is settled against the codebase, n
 from __future__ import annotations
 import ast
 import os
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set
 
@@ -66,6 +67,18 @@ def _iter_py(root: str):
         for fn in filenames:
             if fn.endswith(".py"):
                 yield os.path.join(dirpath, fn)
+
+
+def _is_test_path(root: str, path: str) -> bool:
+    """A test module by pytest's conventions — judged on the path RELATIVE to the repo (a repo that itself lives
+    under `/…/tests/…` must not turn every module into a test) and on the file NAME's test prefix/suffix (so
+    `latest.py`, `contest.py`, `attestation.py` stay source modules)."""
+    rel = os.path.relpath(path, root)
+    parts = rel.split(os.sep)
+    name = parts[-1].lower()
+    if name.startswith("test") or name.endswith(("_test.py", "_tests.py")) or name == "conftest.py":
+        return True
+    return any(p.lower() in ("tests", "test", "testing") for p in parts[:-1])
 
 
 def _module_key(root: str, path: str) -> str:
@@ -141,12 +154,13 @@ def analyze_repo_semantics(repo_path: str, max_files: int = 2000) -> RepoModel:
             break
         count += 1
         try:
-            tree = ast.parse(open(path, "r", encoding="utf-8", errors="ignore").read())
+            with open(path, "r", encoding="utf-8", errors="ignore") as fh:
+                tree = ast.parse(fh.read())
         except Exception:
             continue
         mod = _module_key(repo_path, path)
         funcs, classes, imports, public, calls = _collect(tree)
-        is_test = "test" in os.path.basename(path).lower() or os.sep + "tests" + os.sep in path
+        is_test = _is_test_path(repo_path, path)
         model.modules[mod] = ModuleInfo(module=mod, path=path, functions=funcs, classes=classes,
                                         imports=imports, public_api=public, is_test=is_test)
         raw_calls[mod] = calls
@@ -179,9 +193,41 @@ def analyze_repo_semantics(repo_path: str, max_files: int = 2000) -> RepoModel:
     return model
 
 
+_MODEL_CACHE: "OrderedDict[str, tuple]" = OrderedDict()
+_MODEL_CACHE_MAX = 8
+
+
+def _tree_fingerprint(root: str) -> tuple:
+    """A cheap (stat-only) fingerprint of every .py the model would parse: changes iff a file is added, removed
+    or modified. Walking + stat is ~100× cheaper than re-parsing every AST."""
+    sig = []
+    for path in _iter_py(root):
+        try:
+            st = os.stat(path)
+        except OSError:
+            continue
+        sig.append((path, st.st_mtime_ns, st.st_size))
+    return tuple(sig)
+
+
 def repo_world_model(repo_path: str) -> RepoModel:
-    """The repo as a world model the engine can reason over (alias of analyze_repo_semantics, named for intent)."""
-    return analyze_repo_semantics(repo_path)
+    """The repo as a world model the engine can reason over (analyze_repo_semantics, named for intent).
+
+    CACHED by (absolute root, stat fingerprint of its .py files): callers like `judge()` ask for the model once
+    per idea, so a self-improvement run over N ideas used to re-parse the whole repository N times. The cache is
+    invalidated by any file add/remove/edit. Treat the returned model as read-only (it may be shared)."""
+    key = os.path.abspath(repo_path)
+    fp = _tree_fingerprint(repo_path)
+    hit = _MODEL_CACHE.get(key)
+    if hit is not None and hit[0] == fp:
+        _MODEL_CACHE.move_to_end(key)
+        return hit[1]
+    model = analyze_repo_semantics(repo_path)
+    _MODEL_CACHE[key] = (fp, model)
+    _MODEL_CACHE.move_to_end(key)
+    while len(_MODEL_CACHE) > _MODEL_CACHE_MAX:
+        _MODEL_CACHE.popitem(last=False)
+    return model
 
 
 def _cand_text(candidate) -> str:

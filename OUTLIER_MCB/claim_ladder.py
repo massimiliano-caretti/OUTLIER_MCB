@@ -32,7 +32,24 @@ _WORD_RULES = {
     "brand new": ("FALSIFIABLE_CLAIM", True),
     "world first": ("EMPIRICALLY_SUPPORTED", True),
     "breakthrough": ("EMPIRICALLY_SUPPORTED", True),
+    # Italian (the activation contract is bilingual — an Italian overclaim used to pass the gate untouched)
+    "teorema": ("SYMBOLICALLY_PROVED", False),
+    "dimostrato": ("SYMBOLICALLY_PROVED", False),
+    "dimostrata": ("SYMBOLICALLY_PROVED", False),
+    "verificato": ("FORMALLY_VERIFIED", False),
+    "verificata": ("FORMALLY_VERIFIED", False),
+    "scoperto": ("EMPIRICALLY_SUPPORTED", True),
+    "scoperta": ("EMPIRICALLY_SUPPORTED", True),
+    "mai visto": ("EMPIRICALLY_SUPPORTED", True),
+    "mai vista": ("EMPIRICALLY_SUPPORTED", True),
+    "senza precedenti": ("FALSIFIABLE_CLAIM", True),
+    "inedito": ("FALSIFIABLE_CLAIM", True),
+    "inedita": ("FALSIFIABLE_CLAIM", True),
+    "primo al mondo": ("EMPIRICALLY_SUPPORTED", True),
+    "rivoluzionario": ("EMPIRICALLY_SUPPORTED", True),
+    "rivoluzionaria": ("EMPIRICALLY_SUPPORTED", True),
 }
+_VERIFIED_WORDS = ("verified", "verificato", "verificata")
 # FIX B: architecture-novelty words need BOTH a proven closure-escape AND a real prior-art check before use.
 _CLOSURE_WORDS = {
     "innovative": "not yet shown to be an advance",
@@ -40,6 +57,11 @@ _CLOSURE_WORDS = {
     "architectural novelty": "closure-escape pending",
     "new architecture": "candidate architecture (closure-escape pending)",
     "genuinely new": "provisionally distinct",
+    "innovativo": "non ancora mostrato come un avanzamento",
+    "innovativa": "non ancora mostrata come un avanzamento",
+    "nuova architettura": "architettura candidata (closure-escape in sospeso)",
+    "genuinamente nuovo": "provvisoriamente distinto",
+    "genuinamente nuova": "provvisoriamente distinta",
 }
 
 # the honest replacement for a word that its evidence does not license.
@@ -50,6 +72,14 @@ _HEDGE = {
     "unprecedented": "not matched in the searched prior art", "novel": "provisionally novel",
     "brand new": "provisionally new", "world first": "not matched in the searched prior art",
     "breakthrough": "candidate improvement",
+    "teorema": "congettura", "dimostrato": "argomentato", "dimostrata": "argomentata",
+    "verificato": "controllato (non verificato formalmente)", "verificata": "controllata (non verificata formalmente)",
+    "scoperto": "proposto", "scoperta": "proposta",
+    "mai visto": "non trovato tra le fonti cercate", "mai vista": "non trovata tra le fonti cercate",
+    "senza precedenti": "non riscontrato nella prior art cercata",
+    "inedito": "provvisoriamente inedito", "inedita": "provvisoriamente inedita",
+    "primo al mondo": "non riscontrato nella prior art cercata",
+    "rivoluzionario": "miglioramento candidato", "rivoluzionaria": "miglioramento candidato",
 }
 
 
@@ -107,7 +137,7 @@ def gate_claim_language(text: str, evidence: Optional[Dict] = None, status: Opti
             # (Audit finding #4 proposed gating this on an achieved rung; the module's CONTRACT is that
             # external_settlement is only True when a real resolver passed, and tests assert the bare flag
             # licenses 'verified' — so hardening belongs at the caller, not here. Left intentional.)
-            if word == "verified" and external_settlement:
+            if word in _VERIFIED_WORDS and external_settlement:
                 continue
             if not _licenses(st, min_rung, needs_pa):
                 violations.append({"word": word, "needs_rung": min_rung, "needs_prior_art": needs_pa,

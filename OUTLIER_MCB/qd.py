@@ -95,7 +95,17 @@ class QDArchive:
     def cell_of(self, candidate: Candidate) -> Tuple:
         """The discrete behavioral cell a candidate maps to (its coordinates on the map)."""
         bd = BehaviorDescriptor.of(candidate, self.pack)
-        return (_complexity_bin(bd.complexity), bd.abstraction_level, bd.axes_vector)
+        broken = set(candidate.breaks)
+        if self.pack is None:
+            # BUGFIX: without a pack the multi-hot vector is all-ones over the candidate's OWN axes, so ideas
+            # breaking DIFFERENT axes ('TIME' vs 'SPACE') collided in one cell and the weaker was discarded —
+            # diversity silently lost. Key the cell by the broken axis NAMES instead.
+            sig = tuple(sorted(broken))
+        else:
+            # an axis the pack does not declare (a transported / invented axis) would otherwise vanish from the
+            # multi-hot vector and collide with a no-break idea — keep it, by name, after the pack slots.
+            sig = bd.axes_vector + tuple(sorted(broken - set(bd.axis_names)))
+        return (_complexity_bin(bd.complexity), bd.abstraction_level, sig)
 
     def add(self, candidate: Candidate, quality: Optional[float] = None) -> bool:
         """Place a candidate on the map. Returns True if it became (or replaced) the elite of its cell.
@@ -141,7 +151,9 @@ class QDArchive:
         out = []
         for cell, (q, c) in self.grid.items():
             cbin, abstraction, axes_vec = cell
-            broken = [a for a, on in zip(BehaviorDescriptor.of(c, self.pack).axis_names, axes_vec) if on]
+            names = BehaviorDescriptor.of(c, self.pack).axis_names if self.pack is not None else ()
+            broken = ([a for a, on in zip(names, axes_vec) if on == 1]
+                      + [x for x in axes_vec if isinstance(x, str)])      # named (off-pack / pack-less) axes
             out.append({"cell": cell, "quality": round(q, 3), "complexity": ["low", "medium", "high"][cbin],
                         "abstraction": ["", "implementation", "interface", "architecture"][abstraction],
                         "breaks": broken, "candidate": c.name})

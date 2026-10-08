@@ -89,7 +89,10 @@ PACK = DomainPack(
     name="meta",
     keywords=["creativity engine", "falsification engine", "assumption-negation", "novelty audit",
               "improve the engine", "scoring metric", "domain pack", "breakable assumption",
-              "self-improve", "rigor theater"],
+              "self-improve", "rigor theater",
+              # Italian (the assistant contract is bilingual EN+IT)
+              "motore di creatività", "motore di falsificazione", "negazione delle assunzioni", "audit di novità",
+              "migliorare il motore", "metrica di punteggio", "assunzione rompibile", "auto-miglioramento"],
     box_name="the average way to improve a creativity engine: add more metrics, more generators, a bigger prompt, let it score itself",
     assumptions=A,
     relations=_edges,

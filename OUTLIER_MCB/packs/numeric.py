@@ -62,7 +62,10 @@ PACK = DomainPack(
     name="numeric",
     # distinctive, mostly multi-word keywords so routing does not steal from coding/math/generic.
     keywords=["symbolic regression", "scientific law", "empirical law", "governing equation",
-              "law from data", "formula from data", "discover a law", "conjecture", "physical law"],
+              "law from data", "formula from data", "discover a law", "conjecture", "physical law",
+              # Italian (the assistant contract is bilingual EN+IT)
+              "regressione simbolica", "legge scientifica", "legge empirica", "equazione governante",
+              "legge dai dati", "formula dai dati", "legge fisica", "congettura"],
     box_name="additive, smooth, polynomial regression over the raw measured variables",
     assumptions=A,
     relations=_edges,

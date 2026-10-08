@@ -108,8 +108,8 @@ def multi_metric_self_improve(epochs: int = 30, n_samples: int = 250, equations=
     base, rec = _sr_recovery_maps(equations, GROWN_PRIMITIVES, n_samples)
     base_ho, rec_ho = _sr_recovery_maps(FEYNMAN_HELDOUT, GROWN_PRIMITIVES, n_samples)   # HELD-OUT (never designed for)
     cur_map = curriculum_recovery_map(SEED_CURRICULUM)   # SELF-GENERATED, externally certified (own fixed sampling — a fixed benchmark, decoupled from the SR loop's n_samples)
-    n_eq = len(equations)
-    n_ho = len(FEYNMAN_HELDOUT)
+    n_eq = max(1, len(equations))          # an empty equation list scores 0, never ZeroDivisionError
+    n_ho = max(1, len(FEYNMAN_HELDOUT))
     sr_pool = list(GROWN_PRIMITIVES.keys())
 
     # ── anti-autoreferentiality gate: every dimension in the MAIN Pareto vector must be EXTERNALLY anchored ──

@@ -16,6 +16,7 @@ rationale+world-test+patch-intent, never "absolute novelty"). Fully opt-in: no `
 """
 from __future__ import annotations
 import os
+import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -24,7 +25,7 @@ from .qd import QDArchive
 from .llm import parse_candidates
 from .patches import (parse_unified_diff, validate_patch_paths, PatchTransaction,
                       patch_substance_evidence)
-from .runner import CommandRunner
+from .runner import CommandRunner, scrubbed_env
 
 _SYSTEM = ("You are an inventive but rigorous engineer. Break a hidden assumption the standard solutions share, "
            "and PROVE it with a failing test then a minimal patch. Reply ONLY with a JSON array of candidates.")
@@ -230,11 +231,18 @@ def classify_test_outcome(result) -> str:
 
 
 def _test_command(plan, repo_root: str) -> List[str]:
-    """An argv LIST (never a shell string → zero injection surface) to run the materialized test."""
-    test_file = next((f.path for f in plan.files if "test" in f.path.lower()), plan.files[0].path)
+    """An argv LIST (never a shell string → zero injection surface) to run the materialized test.
+
+    Runs under THIS interpreter (`sys.executable`), not whatever `python` is on PATH (absent on many systems,
+    or a different env without the project's deps). An LLM-chosen path that starts with '-' is prefixed with
+    './' so it can never be parsed as a pytest/python OPTION (e.g. `--basetemp=…`, `-c …`)."""
+    live = [f for f in plan.files if not f.is_delete] or list(plan.files)
+    test_file = next((f.path for f in live if "test" in f.path.lower()), live[0].path)
+    if test_file.startswith("-"):
+        test_file = "./" + test_file
     if test_file.endswith(".py") and "test" in test_file.lower():
-        return ["python", "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider"]
-    return ["python", test_file]
+        return [sys.executable or "python", "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider"]
+    return [sys.executable or "python", test_file]
 
 
 def _to_candidate(cd: Dict, pack) -> Candidate:
@@ -395,6 +403,16 @@ def _repair_field(llm, kind: str, context: str) -> str:
     return outs[0] if outs else ""
 
 
+def _previous(patch: str, label: str, limit: int = 2000) -> str:
+    """Context for a repair prompt: the model must SEE the artifact it is asked to fix (a repair request that
+    only shows the failure tail makes the model re-guess the whole patch blind)."""
+    patch = (patch or "").strip()
+    if not patch:
+        return ""
+    clipped = patch if len(patch) <= limit else patch[:limit] + "\n…(truncated)"
+    return f"\n\nYOUR PREVIOUS {label}:\n{clipped}"
+
+
 # ── transactional materialisation (§2: snapshot → RED → impl → GREEN → rollback unless kept) ──
 def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: int, llm=None,
                  max_test_repairs: int = 0, max_impl_repairs: int = 0, keep_failed: bool = False,
@@ -408,7 +426,7 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
     # Disable bytecode caching for materialized runs: rapid same-size rewrites (e.g. `return 41`→`return 42`
     # within the same second) defeat __pycache__'s mtime+size invalidation, so a fresh `python` would import
     # STALE bytecode and report a false RED/GREEN. With no .pyc ever written, the source is always read fresh.
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = scrubbed_env({"PYTHONDONTWRITEBYTECODE": "1"})   # no API keys for LLM-written code
     test_patch = cd.get("test_patch")
     if not test_patch:
         return ev
@@ -424,7 +442,8 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
         tries = 0
         while not res["applied"] and llm is not None and tries < max_test_repairs:
             tries += 1; tel["test_repairs"] = tel.get("test_repairs", 0) + 1
-            test_patch = _repair_field(llm, "test", "; ".join(res["errors"]) or "test_patch did not apply")
+            test_patch = _repair_field(llm, "test", ("; ".join(res["errors"]) or "test_patch did not apply")
+                                       + _previous(test_patch, "test_patch"))
             plan = parse_unified_diff(test_patch)
             if not validate_patch_paths(plan, repo_root)[0]:
                 break
@@ -443,11 +462,11 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
         while outcome == "RED_COLLECTION" and llm is not None and tries < max_test_repairs:
             tries += 1; tel["test_repairs"] = tel.get("test_repairs", 0) + 1
             fixed = _repair_field(llm, "test", "the test failed at COLLECTION (import/syntax), not on an "
-                                  "assertion:\n" + result.tail())
+                                  "assertion:\n" + result.tail() + _previous(test_patch, "test_patch"))
             fplan = parse_unified_diff(fixed)
             if not validate_patch_paths(fplan, repo_root)[0] or not tx.apply(fplan)["applied"]:
                 break
-            plan = fplan; cmd = _test_command(plan, repo_root)
+            plan = fplan; test_patch = fixed; cmd = _test_command(plan, repo_root)
             result = runner.run(cmd, cwd=repo_root, timeout=timeout, env=env)
             outcome = classify_test_outcome(result); ev["tail"] = result.tail()
         ev["red_kind"] = outcome
@@ -467,7 +486,10 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
                 tries = 0
                 while not ev["green_final"] and llm is not None and tries < max_impl_repairs:
                     tries += 1; tel["impl_repairs"] = tel.get("impl_repairs", 0) + 1
-                    fixed = _repair_field(llm, "impl", "the test is still RED after your patch:\n" + result2.tail())
+                    fixed = _repair_field(llm, "impl", "the test is still RED after your patch:\n" + result2.tail()
+                                          + _previous(test_patch, "test_patch (already applied)")
+                                          + _previous(impl, "implementation_patch (applied, did not go GREEN)"))
+                    impl = fixed
                     fiplan = parse_unified_diff(fixed)
                     if not validate_patch_paths(fiplan, repo_root)[0] or not tx.apply(fiplan)["applied"]:
                         break

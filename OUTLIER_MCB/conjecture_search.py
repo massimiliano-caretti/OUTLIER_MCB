@@ -8,6 +8,7 @@ is the SOLVER's, never the engine's. Honest naming: a `FORMALLY_PROVED` result i
 solver's decidable fragment — NOT 'a new theorem' unless it also clears an online prior-art check.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -83,7 +84,9 @@ def mine_conjectures_from_formula(formula_expr: str, variables: Dict[str, Tuple[
     out: List[Conjecture] = []
     if len(names) >= 2:
         a, b = names[0], names[1]
-        swapped = formula_expr.replace(a, "§").replace(b, a).replace("§", b)
+        # swap WHOLE identifiers only: a substring replace corrupts 'abs' (var 'a') or 'x10' (var 'x1').
+        swapped = re.sub(r"\b(%s|%s)\b" % (re.escape(a), re.escape(b)),
+                         lambda m: b if m.group(1) == a else a, formula_expr)
         out.append(Conjecture(statement=f"the law is symmetric in {a},{b}",
                               claim_expr=f"({formula_expr}) == ({swapped})", variables=dict(variables)))
     out.append(Conjecture(statement=f"the law is non-negative", claim_expr=f"({formula_expr}) >= 0",

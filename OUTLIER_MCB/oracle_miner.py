@@ -25,9 +25,51 @@ def _terms(oracle: Oracle, n: int) -> List[int]:
     return [int(x) for x in oracle[:n]]
 
 
+_PRIME = (1 << 61) - 1                       # a Mersenne prime for the modular rank pre-filter
+
+
+def _full_column_rank_mod_p(rows: List[List[Fraction]], p: int = _PRIME) -> bool:
+    """True iff `rows` certainly has full column rank over Q, decided cheaply modulo a large prime.
+
+    rank_p(A) ≤ rank_Q(A) for any rational A whose denominators are invertible mod p, so full column rank mod p
+    PROVES the rational nullspace is trivial (a sound early rejection). False means 'unknown — do the exact
+    elimination'. This avoids exact Fraction elimination on astronomically large entries (super-exponential
+    sequences), which is where almost every candidate (order, degree) is rejected anyway."""
+    if not rows:
+        return False
+    n = len(rows[0])
+    if len(rows) < n:
+        return False
+    M = []
+    for r in rows:
+        row = []
+        for x in r:
+            x = Fraction(x)
+            if x.denominator % p == 0:
+                return False
+            row.append((x.numerator % p) * pow(x.denominator % p, p - 2, p) % p)
+        M.append(row)
+    rank, m = 0, len(M)
+    for c in range(n):
+        pr = next((i for i in range(rank, m) if M[i][c]), None)
+        if pr is None:
+            return False                         # a free column mod p — the exact path decides
+        M[rank], M[pr] = M[pr], M[rank]
+        inv = pow(M[rank][c], p - 2, p)
+        M[rank] = [(v * inv) % p for v in M[rank]]
+        for i in range(m):
+            if i != rank and M[i][c]:
+                f = M[i][c]
+                M[i] = [(a - f * b) % p for a, b in zip(M[i], M[rank])]
+        rank += 1
+    return rank == n
+
+
 def _nullspace_vec(rows: List[List[Fraction]]) -> Optional[List[Fraction]]:
     """A nonzero rational vector in the right nullspace of `rows` (reduced row echelon), or None if trivial.
     Deterministic: fixed pivoting, the FIRST free column is set to 1."""
+    if _full_column_rank_mod_p(rows):
+        return None                              # provably trivial nullspace — skip the exact elimination
     A = [list(r) for r in rows]
     m = len(A)
     n = len(A[0]) if A else 0
@@ -489,15 +531,17 @@ def guess_asymptotic(oracle: Oracle, n_terms: int = 40, band_tol: float = 0.15) 
     fit, held = pts[:-hold], pts[-hold:]
     models = []
     la = [math.log(v) for _, v in fit]
-    # power law  a(n) ~ C·n^α
+    # power law  a(n) ~ C·n^α   (the prefactor is reported in log space when exp() would overflow)
     al = _lin_slope([math.log(i) for i, _ in fit], la)
-    models.append(("%.3f·n^%.3f" % (math.exp(sum(la[k] - al * math.log(fit[k][0]) for k in range(len(fit))) / len(fit)), al),
-                   lambda i, al=al: i ** al))
+    log_c = sum(la[k] - al * math.log(fit[k][0]) for k in range(len(fit))) / len(fit)
+    c_txt = ("%.3f" % math.exp(log_c)) if log_c < 700 else ("exp(%.1f)" % log_c)
+    models.append(("%s·n^%.3f" % (c_txt, al), lambda i, al=al: i ** al))
     # n·log n
     models.append(("C·n·log n", lambda i: i * math.log(i)))
     # exponential  a(n) ~ C·r^n
     rl = _lin_slope([i for i, _ in fit], la)
-    models.append(("C·%.4f^n" % math.exp(rl), lambda i, rl=rl: math.exp(rl * i)))
+    models.append((("C·%.4f^n" % math.exp(rl)) if rl < 700 else ("C·exp(%.3f·n)" % rl),
+                   lambda i, rl=rl: math.exp(rl * i)))
     # stretched exp  exp(c·√n)
     cl = _lin_slope([math.sqrt(i) for i, _ in fit], la)
     models.append(("exp(%.3f·√n)" % cl, lambda i, cl=cl: math.exp(cl * math.sqrt(i))))
@@ -684,7 +728,10 @@ def mine_invariants(oracle: Oracle, n_terms: int = 20, max_order: int = 3, max_d
     asym = None if (exact or poly or alg) else guess_asymptotic(oracle, n_terms=nl_n)
     ratio = None
     if len(terms) >= 4 and all(terms[i] != 0 for i in range(len(terms) - 3, len(terms))):
-        ratio = terms[-1] / terms[-2]
+        try:
+            ratio = terms[-1] / terms[-2]
+        except OverflowError:                    # the ratio itself exceeds float range: no finite spark
+            ratio = None
     sparks = []
     if closed:
         sparks.append(f"a(n) is an explicit degree-{closed.degree} polynomial in n — a closed form is in hand")

@@ -29,14 +29,34 @@ class ResearchError(OUTLIER_MCBError):
     """A provider returned nothing usable (no sources) — the engine will not build a pack from nothing."""
 
 
+# words that describe the REQUEST (invent / novel / better / nuovo …), not the DOMAIN. They must never become a
+# sourced pack's routing keywords: a registered "web_…" pack keyed on 'invent'/'novel' captured EVERY later
+# creative request for an unrelated domain (with full confidence, so the elicitation guard never fired).
+_REQUEST_WORDS = {
+    "the", "a", "an", "for", "with", "design", "new", "build", "make", "system", "that", "this", "from", "into",
+    "invent", "invents", "invented", "inventing", "invention", "reinvent", "novel", "novelty", "original",
+    "better", "best", "improve", "improved", "improvement", "discover", "discovery", "breakthrough",
+    "rethink", "scratch", "never", "seen", "different", "genuinely", "truly", "something", "approach", "method",
+    "idea", "ideas", "propose", "create", "innovative", "innovation", "radically", "completely", "entirely",
+    "inventa", "inventare", "inventato", "invenzione", "nuovo", "nuova", "nuovi", "nuove", "originale", "scopri",
+    "scoprire", "scoperta", "migliore", "migliorare", "miglioramento", "ripensa", "ripensare", "zero", "modo",
+    "metodo", "qualcosa", "della", "delle", "degli", "nella", "nelle", "sulla", "questo",
+    "questa", "progetta", "progettare", "crea", "creare", "innovazione", "innovativo", "completamente",
+}
+
+
+def _domain_words(text: str) -> List[str]:
+    return [w for w in "".join(c if c.isalnum() else " " for c in (text or "").lower()).split()
+            if len(w) > 3 and w not in _REQUEST_WORDS]
+
+
 def _slug(text: str) -> str:
-    return ("web_" + "_".join((text or "domain").lower().split()[:4])).replace("-", "_")[:40]
+    words = _domain_words(text) or (text or "domain").lower().split()
+    return ("web_" + "_".join(words[:4])).replace("-", "_")[:40]
 
 
 def _keywords(prompt: str) -> List[str]:
-    stop = {"the", "a", "an", "for", "with", "design", "new", "build", "make", "system", "that"}
-    return sorted({w for w in "".join(c if c.isalnum() else " " for c in (prompt or "").lower()).split()
-                   if len(w) > 3 and w not in stop})[:8]
+    return sorted(set(_domain_words(prompt)))[:8]
 
 
 def auto_elicit(prompt: str, provider, register: bool = True, n_axes: int = 4) -> tuple:

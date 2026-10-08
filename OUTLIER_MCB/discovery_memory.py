@@ -95,25 +95,34 @@ class DiscoveryMemory:
         return {o.assumption: {"status": "DEAD_REFUTED", "axis": o.axis, "assumption": o.assumption}
                 for o in self.barren() if domain is None or o.domain == domain}
 
+    MAX_DISCOVERED = 2000      # bound on persisted emergent entries (oldest evicted first)
+
     def promote(self, assumption: str, axis: str, domain: str, note: str = "") -> None:
         """Record an EMERGENT assumption/axis the engine discovered (e.g. via transformation/blending) worth
-        adding to a pack later — the memory grows the engine's own vocabulary over time."""
+        adding to a pack later — the memory grows the engine's own vocabulary over time. Idempotent per
+        (assumption, axis, domain): re-promoting the same discovery refreshes its note instead of appending a
+        duplicate (a long-running loop used to grow the persisted file without bound)."""
+        for item in self.discovered:
+            if (item.get("assumption"), item.get("axis"), item.get("domain")) == (assumption, axis, domain):
+                item["note"] = note or item.get("note", "")
+                return
         self.discovered.append({"assumption": assumption, "axis": axis, "domain": domain, "note": note})
+        if len(self.discovered) > self.MAX_DISCOVERED:
+            del self.discovered[:len(self.discovered) - self.MAX_DISCOVERED]
 
     def save(self, path: str) -> None:
-        import json
+        from .memory import atomic_write_json
         data = {"outcomes": {k: o.__dict__ for k, o in self.outcomes.items()}, "discovered": self.discovered}
-        with open(path, "w") as fh:
-            json.dump(data, fh, indent=2)
+        atomic_write_json(path, data, indent=2)
 
     @classmethod
     def load(cls, path: str) -> "DiscoveryMemory":
-        import json
         import os
+        from .memory import read_json
         mem = cls()
         if not os.path.exists(path):
             return mem
-        data = json.load(open(path))
+        data = read_json(path)
         mem.outcomes = {k: AssumptionOutcome(**v) for k, v in data.get("outcomes", {}).items()}
         mem.discovered = list(data.get("discovered", []))
         return mem

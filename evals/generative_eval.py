@@ -26,14 +26,16 @@ def _pack_induction_score() -> Dict:
 
 def _semantic_grounding_score() -> Dict:
     import OUTLIER_MCB as gsl
-    d = tempfile.mkdtemp()
-    os.makedirs(os.path.join(d, "pkg"))
-    os.makedirs(os.path.join(d, "tests"))
-    open(os.path.join(d, "pkg", "core.py"), "w").write("def rate_limit(x):\n    return x\n")
-    open(os.path.join(d, "pkg", "api.py"), "w").write("from pkg.core import rate_limit\ndef serve(r):\n    return rate_limit(r)\n")
-    open(os.path.join(d, "tests", "test_core.py"), "w").write("from pkg import core\ndef test_x():\n    assert core.rate_limit(1)==1\n")
-    model = gsl.analyze_repo_semantics(d)
-    ab = gsl.repo_grounding_ablation(model)
+    files = {("pkg", "core.py"): "def rate_limit(x):\n    return x\n",
+             ("pkg", "api.py"): "from pkg.core import rate_limit\ndef serve(r):\n    return rate_limit(r)\n",
+             ("tests", "test_core.py"): "from pkg import core\ndef test_x():\n    assert core.rate_limit(1)==1\n"}
+    with tempfile.TemporaryDirectory(prefix="gsl_geneval_") as d:      # removed afterwards (no /tmp litter)
+        for parts, src in files.items():
+            os.makedirs(os.path.join(d, parts[0]), exist_ok=True)
+            with open(os.path.join(d, *parts), "w", encoding="utf-8") as fh:
+                fh.write(src)
+        model = gsl.analyze_repo_semantics(d)
+        ab = gsl.repo_grounding_ablation(model)
     earns = ab["grounding_discriminates"]
     return {"score": 1.0 if earns else 0.0, "earns_keep": earns,
             "untested_modules_found": model.modules_without_tests(), **ab}

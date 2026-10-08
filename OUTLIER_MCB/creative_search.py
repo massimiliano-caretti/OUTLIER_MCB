@@ -192,7 +192,7 @@ def creative_search(problem: str, generator: Optional[Callable] = None, evaluato
 
     # round 0: seed the database
     seeds = seed if seed is not None else (generate_candidates(pack, problem))
-    for c in seeds[:max(1, budget)]:
+    for c in seeds[:max(0, budget)]:                  # budget = #evaluations: budget 0 evaluates nothing
         _ingest(c, 0, parents=[], path=[c.operator])
     spent = len(records)
 

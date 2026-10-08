@@ -154,7 +154,10 @@ def certify_reduction(oracle_a, oracle_b, transform: Callable[[List[int]], List[
         return DiscoveryResult(state="OPEN", trace=[f"reduction transform failed: {exc}"])
     m = min(len(mapped), len(a))
     holds = m >= 3 and all(mapped[i] == a[i] for i in range(m))
-    scrambled = list(transform(list(reversed(b[:k]))))
+    try:
+        scrambled = list(transform(list(reversed(b[:k]))))
+    except Exception:                            # the control input broke the transform → it cannot match A
+        scrambled = []
     neg = len(scrambled) >= m and all(scrambled[i] == a[i] for i in range(m))   # must FAIL on scrambled input
     if holds and not neg:
         return DiscoveryResult(state="REDUCTION_ESTABLISHED", form="REDUCTION",

@@ -12,6 +12,7 @@ reason — never crashes the loop.
 from __future__ import annotations
 import json
 import os
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -29,12 +30,33 @@ class CallableLLMProvider(LLMProvider):
     def __init__(self, fn: Callable[[str], object]):
         self.fn = fn
 
+    def _wants_n(self) -> bool:
+        """True iff fn cannot be called with the prompt alone but can with (prompt, n)."""
+        import inspect
+        try:
+            sig = inspect.signature(self.fn)
+        except (TypeError, ValueError):             # builtins / C callables without a signature: prompt only
+            return False
+        try:
+            sig.bind("p")
+            return False
+        except TypeError:
+            pass
+        try:
+            sig.bind("p", 1)
+            return True
+        except TypeError:
+            return False
+
     def complete(self, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1) -> List[str]:
         full = (system + "\n\n" + prompt) if system else prompt
-        try:
-            out = self.fn(full)
-        except TypeError:
+        if self._wants_n():
             out = self.fn(full, n)        # callables that want the sample count
+        else:
+            # Decided by SIGNATURE, not by catching TypeError: a TypeError raised INSIDE fn (a real bug) used to
+            # trigger a second call fn(full, n) — consuming a stateful fake's next batch twice and masking the
+            # original error with a misleading "takes 1 positional argument" one.
+            out = self.fn(full)
         if isinstance(out, str):
             return [out]
         return [str(x) for x in (out or [])]
@@ -148,23 +170,47 @@ def validate_obj(obj: object, schema: Dict) -> Tuple[bool, List[str]]:
     return (not errors), errors
 
 
+_FENCE_RE = re.compile(r"```[ \t]*[A-Za-z0-9_+-]*[ \t]*\r?\n(.*?)```", re.DOTALL)
+_MAX_DECODE_ATTEMPTS = 256
+
+
+def _first_json_value(text: str):
+    """Decode the first JSON value in `text` that is a CANDIDATE container: an object, or an array holding at
+    least one object. Each '{' / '[' is tried IN ORDER with raw_decode — so an object that merely contains an
+    array field is returned whole (not its inner list), and a prose citation like '[1]' before the JSON is
+    skipped. Falls back to the first decodable container of any shape. None when nothing decodes."""
+    dec = json.JSONDecoder()
+    fallback = None
+    attempts = 0
+    for i, ch in enumerate(text):
+        if ch not in "[{":
+            continue
+        attempts += 1
+        if attempts > _MAX_DECODE_ATTEMPTS:          # bounded work on a huge, bracket-heavy completion
+            break
+        try:
+            val, _end = dec.raw_decode(text, i)
+        except ValueError:
+            continue
+        if isinstance(val, dict) or (isinstance(val, list) and any(isinstance(x, dict) for x in val)):
+            return val
+        if fallback is None:
+            fallback = val
+    return fallback
+
+
 def _extract_json(text: str):
-    """Pull the first JSON value out of an LLM completion (tolerant of code fences / surrounding prose)."""
+    """Pull the first JSON value out of an LLM completion (tolerant of code fences / surrounding prose).
+    Fenced blocks (```json … ```) are tried first, then the whole completion."""
     t = (text or "").strip()
-    if "```" in t:                                  # strip a ```json fence if present
-        parts = t.split("```")
-        for p in parts:
-            p = p.strip()
-            if p.startswith(("[", "{")):
-                t = p.lstrip("json").strip(); break
-    for opener, closer in (("[", "]"), ("{", "}")):
-        a, b = t.find(opener), t.rfind(closer)
-        if a != -1 and b != -1 and b > a:
-            try:
-                return json.loads(t[a:b + 1])
-            except json.JSONDecodeError:
-                continue
-    return None
+    fallback = None
+    for block in _FENCE_RE.findall(t) + [t]:
+        val = _first_json_value(block.strip())
+        if isinstance(val, dict) or (isinstance(val, list) and any(isinstance(x, dict) for x in val)):
+            return val
+        if fallback is None and val is not None:
+            fallback = val
+    return fallback
 
 
 @dataclass

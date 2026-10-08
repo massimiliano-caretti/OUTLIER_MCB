@@ -16,10 +16,41 @@ Both are persistent (JSON) and honest: similarity is a lexical/semantic proxy (p
 is evidence not proof, and nothing claims novelty.
 """
 from __future__ import annotations
+import json
+import os
+import tempfile
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .embeddings import semantic_distance
+
+
+# ── persistence helpers shared by the JSON memories (memory / discovery_memory / self_diagnosis) ──
+def atomic_write_json(path: str, data, **dump_kw) -> None:
+    """Serialize FIRST, then write to a temp file in the same directory and os.replace() it over `path`.
+    A crash, a non-serializable value or a concurrent reader can therefore never observe (or leave behind) a
+    truncated / half-written memory file — the previous version stays intact until the new one is complete."""
+    text = json.dumps(data, **dump_kw)                  # raises BEFORE the existing file is touched
+    d = os.path.dirname(os.path.abspath(path)) or "."
+    fd, tmp = tempfile.mkstemp(prefix=".tmp_" + os.path.basename(path) + ".", dir=d)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def read_json(path: str):
+    """Load JSON from `path` with the handle closed deterministically."""
+    with open(path, "r", encoding="utf-8") as fh:
+        return json.load(fh)
 
 
 # ── episodic memory ─────────────────────────────────────────────────────────────────────────────────
@@ -41,9 +72,14 @@ class Episode:
 @dataclass
 class EpisodicMemory:
     episodes: List[Episode] = field(default_factory=list)
+    # bounded: a persisted memory that only ever grows makes every recall O(history) and the JSON unbounded.
+    # The OLDEST episodes are evicted first (None ⇒ unbounded, the explicit opt-out).
+    max_episodes: Optional[int] = 5000
 
     def record(self, episode: Episode) -> Episode:
         self.episodes.append(episode)
+        if self.max_episodes is not None and len(self.episodes) > self.max_episodes:
+            del self.episodes[:len(self.episodes) - self.max_episodes]
         return episode
 
     def recall(self, query: str, k: int = 3, embedder=None) -> List[Tuple[Episode, float]]:
@@ -76,17 +112,13 @@ class EpisodicMemory:
                    for e in self.episodes)
 
     def save(self, path: str) -> None:
-        import json
-        with open(path, "w") as fh:
-            json.dump([e.__dict__ for e in self.episodes], fh, indent=2)
+        atomic_write_json(path, [e.__dict__ for e in self.episodes], indent=2)
 
     @classmethod
     def load(cls, path: str) -> "EpisodicMemory":
-        import json
-        import os
         if not os.path.exists(path):
             return cls()
-        return cls(episodes=[Episode(**d) for d in json.load(open(path))])
+        return cls(episodes=[Episode(**d) for d in read_json(path)])
 
     def markdown(self) -> str:
         return f"## Episodic memory — {len(self.episodes)} episodes " \
@@ -152,17 +184,13 @@ class AnalogicalMemory:
                       key=lambda o: -o.prior)
 
     def save(self, path: str) -> None:
-        import json
-        with open(path, "w") as fh:
-            json.dump({k: o.__dict__ for k, o in self.analogies.items()}, fh, indent=2)
+        atomic_write_json(path, {k: o.__dict__ for k, o in self.analogies.items()}, indent=2)
 
     @classmethod
     def load(cls, path: str) -> "AnalogicalMemory":
-        import json
-        import os
         if not os.path.exists(path):
             return cls()
-        return cls(analogies={k: AnalogyOutcome(**v) for k, v in json.load(open(path)).items()})
+        return cls(analogies={k: AnalogyOutcome(**v) for k, v in read_json(path).items()})
 
     def markdown(self) -> str:
         fert = self.fertile()

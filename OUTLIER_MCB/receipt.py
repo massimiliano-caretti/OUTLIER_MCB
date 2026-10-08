@@ -47,7 +47,10 @@ def novelty_receipt(idea: str, prompt: Optional[str] = None, pack=None, prior_ar
                      "sources_searched": na.sources_searched}
         # HONEST: only a REAL online prior-art check counts. An offline/lexical corpus is capped at
         # INCOMPLETE by honest_prior_art_status, so it must NOT license a novelty claim here either.
-        prior_art_checked = (getattr(na, "novelty_scope", "") == "ONLINE_PRIOR_ART_CHECKED")
+        # BUGFIX: a check that FOUND the idea (RENAMED / COLLAGE) refutes novelty — it must not license the
+        # novelty words ('novel', 'genuinely new', …) that `prior_art_checked=True` unlocks in the claim gate.
+        prior_art_checked = (getattr(na, "novelty_scope", "") == "ONLINE_PRIOR_ART_CHECKED"
+                             and na.status == "NO_PRIOR_ART_FOUND")
     else:
         prior_art = {"status": "PRIOR_ART_UNCHECKED", "provisional": True, "sources_searched": 0}
         prior_art_checked = False
@@ -59,6 +62,10 @@ def novelty_receipt(idea: str, prompt: Optional[str] = None, pack=None, prior_ar
     ev = {k: _s(v) for k, v in ev.items()}          # sanitize caller-supplied evidence so the receipt stays serialisable
     claim_text = claim or f"{idea} — a novel contribution"
     g = gate_claim_language(claim_text, ev)
+    if j.verdict in ("DEAD_BY_BARRIER", "INSIDE_THE_BOX"):
+        # a route killed by a no-go theorem, or an idea inside the box, licenses NO novelty wording at all — the
+        # hedged 'provisionally novel' the language gate would otherwise allow contradicts the verdict.
+        g = {"rewritten": f"{idea} — {j.verdict}: not a novel contribution ({j.next_step[:160]})", "allowed": False}
 
     receipt = {
         "schema_version": SCHEMA_VERSION,

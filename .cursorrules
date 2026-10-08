@@ -21,6 +21,11 @@ Then obey the brief. For the full loop:
   m.explore("<request>", evaluator=<objective>, prior_art_provider=<online>, llm=<model>)   # invention
   m.explore("<claim>", math_claim="x**2+y**2>=2*x*y", math_variables={"x":(-5,5),"y":(-5,5)})  # theorems → z3/lean
 
+STEP 0 (anti-mode): first write your 3-5 most-likely DEFAULT answers; then
+  python -m OUTLIER_MCB mode --problem "<request>" --answer "<default 1>" --answer "<default 2>" ...
+breaks what they share. Every final idea must be TAIL vs those answers (check with --idea "<idea>").
+PASSO 0: scrivi prima le tue 3-5 risposte di default; ogni idea finale deve essere TAIL rispetto a esse.
+
 RULES (non-negotiable):
 1. Never answer a novelty/invention request from memory — run the library first.
 2. Break a hidden assumption and name it; breaking none = INSIDE_THE_BOX (not an answer).

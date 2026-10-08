@@ -23,6 +23,7 @@ import hashlib
 import os
 import re
 import shutil
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -30,7 +31,7 @@ from typing import Dict, List, Optional
 
 from .patches import (parse_unified_diff, validate_patch_paths, PatchTransaction,
                       patch_substance_evidence)
-from .runner import CommandRunner
+from .runner import CommandRunner, scrubbed_env
 
 
 def _slug(text: str) -> str:
@@ -173,7 +174,7 @@ class MaterializationReceipt:
 
 def _run(runner: CommandRunner, test_file: str, root: str, env: dict, timeout: int):
     from .llm_loop import classify_test_outcome
-    cmd = ["python", "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider"]
+    cmd = [sys.executable or "python", "-m", "pytest", test_file, "-q", "-p", "no:cacheprovider"]
     res = runner.run(cmd, cwd=root, timeout=timeout, env=env)
     return classify_test_outcome(res), res
 
@@ -189,15 +190,15 @@ def settle_by_materialization(candidate=None, claim: str = "", *, timeout: int =
     from .llm_loop import test_quality_evidence
     art = synthesize_artifact(candidate, claim)
     name = getattr(candidate, "name", "") or (claim[:40] if claim else "candidate")
-    env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
+    env = scrubbed_env({"PYTHONDONTWRITEBYTECODE": "1"})   # no API keys for LLM-written code
     runner = CommandRunner(default_timeout=timeout)
-    root = tempfile.mkdtemp(prefix="gsl_selfmat_")
     tq = test_quality_evidence(art.test_patch, claim=name, broken_assumption="")["score"]
     subst = patch_substance_evidence(art.test_patch, art.impl_patch)["score"]
     rec = MaterializationReceipt(
         candidate=name, materialized=False, red_first=False, red_kind="NOT_MATERIALIZED",
         green_final=False, repaired=False, negative_control_holds=False,
         test_quality=tq, patch_substance=subst, status="NOT_SETTLED")
+    root = tempfile.mkdtemp(prefix="gsl_selfmat_")      # created last: nothing can raise before the cleanup try
     try:
         Path(root, "pyproject.toml").write_text("[tool.pytest.ini_options]\n")
         Path(root, art.module).write_text(art.seed_impl)          # repo starts WRONG but import-clean

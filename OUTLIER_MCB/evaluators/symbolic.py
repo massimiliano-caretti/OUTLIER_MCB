@@ -163,9 +163,13 @@ def _solve(ata: List[List[float]], aty: List[float]) -> List[float]:
     """Gaussian elimination with partial pivoting on the (already symmetric) normal-equation system."""
     n = len(aty)
     m = [row[:] + [aty[i]] for i, row in enumerate(ata)]
+    # RELATIVE rank threshold: a column that is (near-)collinear with earlier ones (x and relu(x) on positive data)
+    # leaves a residual pivot of order ridge + round-off. An absolute epsilon kept it, splitting one coefficient
+    # into +c·x − c·relu(x): numerically exact, symbolically wrong. Relative to the diagonal, it is dropped (→ 0).
+    eps = max(_EPS, 1e-9 * max((abs(ata[i][i]) for i in range(n)), default=0.0))
     for col in range(n):
         piv = max(range(col, n), key=lambda r: abs(m[r][col]))
-        if abs(m[piv][col]) < _EPS:
+        if abs(m[piv][col]) < eps:
             continue
         m[col], m[piv] = m[piv], m[col]
         pivot = m[col][col]
@@ -174,17 +178,27 @@ def _solve(ata: List[List[float]], aty: List[float]) -> List[float]:
                 f = m[r][col] / pivot
                 for c in range(col, n + 1):
                     m[r][c] -= f * m[col][c]
-    return [m[i][n] / m[i][i] if abs(m[i][i]) > _EPS else 0.0 for i in range(n)]
+    return [m[i][n] / m[i][i] if abs(m[i][i]) > eps else 0.0 for i in range(n)]
 
 
 def least_squares(X: Sequence[Row], y: Sequence[float], terms: List[Term], ridge: float = 1e-8) -> Formula:
     """Fit Σ coeff·term to y by ridge-stabilized least squares — deterministic, no dependencies."""
     k = len(terms)
     feats = [[t.fn(row) for t in terms] for row in X]
-    ata = [[sum(feats[s][i] * feats[s][j] for s in range(len(X))) + (ridge if i == j else 0.0)
+    # COLUMN EQUILIBRATION: scale each feature to unit RMS before solving, then unscale the coefficients. The
+    # ridge and the pivot threshold are absolute, so on raw SI-scale data (features ~1e-6, e.g. kB·T) they
+    # swamped the signal and an exact law was not recovered. Scaling makes the fit unit-invariant.
+    n = len(X)
+    scale = []
+    for i in range(k):
+        rms = math.sqrt(sum(feats[s][i] * feats[s][i] for s in range(n)) / n) if n else 0.0
+        scale.append(rms if (rms > 0.0 and math.isfinite(rms)) else 1.0)
+    feats = [[f[i] / scale[i] for i in range(k)] for f in feats]
+    ata = [[sum(feats[s][i] * feats[s][j] for s in range(n)) + (ridge if i == j else 0.0)
             for j in range(k)] for i in range(k)]
-    aty = [sum(feats[s][i] * y[s] for s in range(len(X))) for i in range(k)]
-    return Formula(terms=terms, coeffs=_solve(ata, aty))
+    aty = [sum(feats[s][i] * y[s] for s in range(n)) for i in range(k)]
+    coeffs = _solve(ata, aty)
+    return Formula(terms=terms, coeffs=[c / scale[i] for i, c in enumerate(coeffs)])
 
 
 # ── falsification metrics ───────────────────────────────────────────────────────────────────────────

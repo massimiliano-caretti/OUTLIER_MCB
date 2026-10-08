@@ -12,13 +12,58 @@ import re
 from ._solver_common import which, run_tool, ast_to_smtlib
 
 
+def _smt_value(term: str) -> str:
+    """Normalise an SMT-LIB numeral term to a plain rational string: `(- 1.0)` → '-1', `(/ 1 2)` → '1/2',
+    `(- (/ 3 4))` → '-3/4'. Falls back to the raw term if it is not a recognised numeral."""
+    from fractions import Fraction
+    toks = term.replace("(", " ( ").replace(")", " ) ").split()
+
+    def parse(i):
+        if toks[i] != "(":
+            return Fraction(toks[i]), i + 1
+        op = toks[i + 1]
+        args, j = [], i + 2
+        while toks[j] != ")":
+            v, j = parse(j)
+            args.append(v)
+        if op == "-" and len(args) == 1:
+            return -args[0], j + 1
+        if op == "/" and len(args) == 2:
+            return args[0] / args[1], j + 1
+        raise ValueError(op)
+    try:
+        val, end = parse(0)
+        if end != len(toks):
+            raise ValueError(term)
+        return str(val)
+    except Exception:
+        return term.strip()
+
+
 def _parse_model(text: str, names):
-    """Best-effort counterexample from an SMT-LIB (get-model): `(define-fun x () Real 3)` → {'x': '3'}."""
+    """Best-effort counterexample from an SMT-LIB (get-model): `(define-fun x () Real 3)` → {'x': '3'},
+    `(define-fun y () Real (- (/ 1 2)))` → {'y': '-1/2'} (balanced parentheses, never a truncated term)."""
     ce = {}
     for n in names:
-        m = re.search(r"\(define-fun\s+" + re.escape(n) + r"\s*\(\)\s*\w+\s+([^\)]+)\)", text)
-        if m:
-            ce[n] = m.group(1).strip()
+        m = re.search(r"\(define-fun\s+" + re.escape(n) + r"\s*\(\)\s*\w+\s+", text)
+        if not m:
+            continue
+        i, depth, start = m.end(), 0, m.end()
+        while i < len(text):                     # read ONE balanced term
+            ch = text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            i += 1
+        term = text[start:i].strip()
+        if term:
+            ce[n] = _smt_value(term)
     return ce or None
 
 

@@ -21,10 +21,22 @@ def recombine_assumptions(pack, k: int = 2, max_candidates: int = 6) -> List[Can
     req = data_req(pack)
     priority = lambda a: pack.axes.get(pack.dimension_of[a.name], {}).get("priority", 1)
     out: List[Candidate] = []
-    for combo in combinations(sorted(breakable(pack), key=lambda a: -priority(a)), k):
+    valid = [combo for combo in combinations(sorted(breakable(pack), key=lambda a: -priority(a)), k)
+             if len({pack.dimension_of[a.name] for a in combo}) == k]       # require distinct axes
+    # coverage-balanced order: lexicographic combinations put the top-priority assumption in the first n-1
+    # pairs, so the capped pool (and every beam built on it) was ~all recombinations of ONE assumption. Pick
+    # greedily the highest-priority pair whose members are least used so far — the first pick is unchanged.
+    used: dict = {}
+    ordered = []
+    remaining = list(enumerate(valid))                                   # (priority rank, combo)
+    while remaining and len(ordered) < max_candidates:                   # max_candidates<=0 ⇒ none (was 1)
+        pick = min(remaining, key=lambda rc: (sum(used.get(a.name, 0) for a in rc[1]), rc[0]))
+        remaining.remove(pick)
+        ordered.append(pick[1])
+        for a in pick[1]:
+            used[a.name] = used.get(a.name, 0) + 1
+    for combo in ordered:
         axes = [pack.dimension_of[a.name] for a in combo]
-        if len(set(axes)) != k:                      # require distinct axes
-            continue
         out.append(Candidate(
             name="×".join(a.name for a in combo),
             operator="recombine", breaks=sorted(set(axes)), assumptions=[a.name for a in combo],
@@ -33,8 +45,6 @@ def recombine_assumptions(pack, k: int = 2, max_candidates: int = 6) -> List[Can
             discipline=("parsimony: it must beat the ABLATION of EACH single break on the same world-test "
                         "(synergy>0); if either break alone matches it, it collapses to that single break."),
         ))
-        if len(out) >= max_candidates:
-            break
     return out
 
 

@@ -10,6 +10,7 @@ It owns no creativity logic — it routes to the existing entrypoints (creative 
 non-negotiable honesty rules so the assistant cannot drift back to answering from memory.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -27,6 +28,8 @@ TRIGGERS = ("new", "novel", "invent", "discover", "original", "never seen", "bre
 STANDING_RULES = """\
 [OUTLIER_MCB — STANDING ROUTINE: once asked to use it, EVERY later 'new / novel / invent / discover'
  request goes through the library FIRST. Do not answer such a request from memory.]
+0. ANTI-MODE: first write your 3-5 most-likely DEFAULT answers (that is the box), then
+     print(m.mode_brief('<the request>', [default_1, ...]))   — every final idea must be TAIL vs them.
 1. Get the brief, then obey it:
      python -c "import OUTLIER_MCB as m; print(m.creative('<the request>'))"
    or run the full loop (generate → settle externally → audit → one honest report):
@@ -48,10 +51,30 @@ STANDING_RULES = """\
 The spark is yours; the rigor is the machine's — and it must be able to DIE on a world-test."""
 
 
+# The MATCHER behind TRIGGERS (kept above as the human-readable list). Raw substring matching fired 'new' on
+# 'knew'/'renewal'/'news' and bare 'better' on almost any sentence, so the routine activated on plain
+# bug-fix chatter; meanwhile 'nuova'/'nuovi' (feminine/plural) never fired. Each pattern is word-anchored and
+# spells out the inflections it accepts (EN + IT): inventa/inventare/inventato/invenzione, nuovo/nuova/nuovi/
+# nuove, scopri/scoprire/scoperta, migliora/migliorare/miglioramento/migliore. 'better' fires only in a
+# comparative-request frame ('a better way', 'better algorithm', 'do better'), not as a bare adjective.
+_TRIGGER_PATTERNS = (
+    # English
+    r"new(?:er|est|ly)?", r"novel(?:ty|ties)?", r"(?:re)?invent\w*", r"discover\w*", r"original(?:ity)?",
+    r"never[\s-]+(?:been\s+)?seen", r"breakthroughs?", r"from\s+scratch", r"re-?think\w*", r"innova\w*",
+    r"improv(?:e|es|ed|ing|ement|ements)", r"different\s+(?:way|approach|angle)s?",
+    r"outside\s+the\s+box", r"(?:a|any|much|far|something|do|make\s+\w+)\s+better",
+    r"better\s+(?:way|approach|method|solution|algorithm|design|architecture|idea|model|version|alternative)s?",
+    # Italian
+    r"nuov[oaie]", r"novità", r"invenzion[ei]", r"scopr\w*", r"scopert[aoie]", r"original[ei]",
+    r"mai\s+vist[oaie]", r"fuori\s+dagli\s+schemi", r"ripens\w*", r"da\s+zero", r"miglior\w*", r"inedit[oaie]",
+)
+_TRIGGER_RX = re.compile(r"(?<!\w)(?:" + "|".join(_TRIGGER_PATTERNS) + r")(?!\w)")
+
+
 def should_activate(prompt: str) -> bool:
-    """True when the prompt asks for something new/novel/invented (any language) — the routine should fire."""
-    t = (prompt or "").lower()
-    return any(w in t for w in TRIGGERS)
+    """True when the prompt asks for something new/novel/invented (EN or IT) — the routine should fire.
+    Word-anchored (see _TRIGGER_PATTERNS): 'knew'/'renewal'/'news' do not fire; 'nuova'/'inventato' do."""
+    return bool(_TRIGGER_RX.search((prompt or "").lower()))
 
 
 @dataclass
@@ -139,16 +162,19 @@ def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = Fa
     elicitation = bool(pf.get("elicitation_required"))
     action = "elicit_pack_or_green_star" if elicitation else "creative_brief_then_answer"
     entrypoint = "elicit_pack|green_star" if elicitation else "creative"
+    # anti-mode step 0: the box is the model's OWN default answer — make it explicit, then leave it. For an unknown
+    # domain this is the only request-specific box available (the generic pack is the same for every prompt).
     next_call = (
-        "elicit_pack(prompt) or green_star(prompt)"
+        "mode_brief(prompt, <your 3-5 default answers>) — else elicit_pack(prompt) or green_star(prompt)"
         if elicitation else
-        "creative(prompt)"
+        "creative(prompt); then judge(idea, prompt=prompt, mode=<your 3-5 default answers>)"
     )
     must_report = [
         "broken_assumption",
         "world_test_or_death_gate",
         "claim_ladder_status",
         "novelty_scope",
+        "mode_verdict (must be TAIL vs your declared default answers)",
     ]
     if missing.get("data_insufficient"):
         must_report.append(f"missing_information:{missing.get('recommended_first')}")
@@ -156,7 +182,10 @@ def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = Fa
         "[compact routine]",
         "EN: Do not answer from memory. Break the named assumption, state the world-test, and hedge novelty to evidence.",
         "IT: Non rispondere a memoria. Rompi l'assunzione indicata, dichiara il world-test e limita la novità alle prove.",
-        f"Recommended break: {rec.get('assumption', '—')} on {rec.get('dimension', '—')}.",
+        "STEP 0 / PASSO 0: write your 3-5 most-likely DEFAULT answers (one concrete mechanism each, with p) — that is",
+        "  the box; m.mode_brief(request, answers) mines what they share. Scrivi prima le tue risposte di default.",
+        f"Recommended break: {rec.get('assumption', '—')} on {rec.get('dimension', '—')}"
+        + (" (generic fallback — prefer the anti-mode breaks)." if elicitation else "."),
         f"Death-gate: {pf.get('death_gate', '—')}",
     ])
     return AssistantRoute(

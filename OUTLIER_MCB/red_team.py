@@ -89,12 +89,14 @@ def rebrand_attack(provider, claim_text: str = "", threshold: float = 0.6) -> At
     def survived(candidate) -> bool:
         text = claim_text or getattr(candidate, "negation", "") or getattr(candidate, "name", "")
         try:
-            from .novelty import rebranding_detector
-            res = provider.research(text)
-            matches = res.get("matches") or res.get("sources") or []
-            return not rebranding_detector(matches, threshold=threshold)
+            # BUGFIX: the raw provider matches usually carry similarity=None (every stdlib online provider and
+            # plain `sources` lists), which made the detector raise and the probe ABSTAIN — so a renamed idea
+            # always survived. novelty_audit computes the lexical similarity when the provider gives none.
+            from .novelty import novelty_audit, rebranding_detector
+            nv = novelty_audit(text, provider, rename_threshold=threshold)
         except Exception:
-            return True
+            return True                                     # search failure → abstain (absence is not proof)
+        return not rebranding_detector(nv.closest_matches, threshold=threshold)
     return Attack(name="rebrand", kind="rebrand", survived=survived, note="prior-art probe (renamed ⇒ broken)")
 
 

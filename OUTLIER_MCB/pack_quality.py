@@ -16,7 +16,8 @@ def pack_quality(pack) -> Dict:
     """Six components + an overall in [0,1]. Higher = a stronger pack."""
     names = [a.name for a in pack.assumptions]
     n = len(pack.assumptions)
-    duplicates = sorted({x for x in names if names.count(x) > 1})
+    seen: set = set()
+    duplicates = sorted({x for x in names if x in seen or seen.add(x)})   # O(n), not names.count() per name
     weak_falsifiers = [a.name for a in pack.assumptions if not _falsifier_specific(a)]
     uncovered_axes = sorted(set(pack.axes) - set(pack.dimension_of.values()))
 

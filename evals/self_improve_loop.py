@@ -91,7 +91,7 @@ def self_improve(epochs: int = 10, n_samples: int = 300, memory: Optional[Diagno
 
     # epoch 0 — the starting capability (default basis): which laws are already recovered, certified
     recovered = {eq.id for eq in FEYNMAN if _recovers(eq, None, n_samples)}
-    start = round(len(recovered) / total, 4)
+    start = round(len(recovered) / max(1, total), 4)
 
     candidates = list(GROWN_PRIMITIVES.items())   # the discoverable primitives, tried one per epoch
     accepted: List[str] = []
@@ -131,7 +131,7 @@ def self_improve(epochs: int = 10, n_samples: int = 300, memory: Optional[Diagno
             if builder is not None:
                 ci += 1   # this candidate did not help here; move on
 
-        fitness = round(len(recovered) / total, 4)
+        fitness = round(len(recovered) / max(1, total), 4)
         log.mark_completed(True)
         memory.record(log)
         # record the monotone fitness on the never-regress frontier when it advances

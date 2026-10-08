@@ -19,6 +19,8 @@ artifact_specificity by construction: a field-complete contract can still score 
 suite-wide command, or a test that already exists). Reports a number in [0,1]; settles nothing by itself.
 """
 from __future__ import annotations
+import os
+import re
 from pathlib import Path
 from typing import Dict
 
@@ -46,20 +48,41 @@ def _target_resolves(target: str, root: Path) -> bool:
     return (root / cleaned).exists() or Path(cleaned).exists()
 
 
+_SKIP_DIRS = {"__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", "node_modules", ".mypy_cache",
+              ".pytest_cache", ".tox", ".nox", "build", "dist", "site-packages", ".eggs"}
+
+
+def _iter_py_files(root: Path):
+    """Every .py under root, pruning VCS / virtualenv / vendored trees (a .venv can hold 10^4 files that are not
+    the project's tests) and never following directory symlinks out of the tree."""
+    for dirpath, dirnames, filenames in os.walk(str(root)):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS and not d.endswith(".egg-info")]
+        for fn in filenames:
+            if fn.endswith(".py"):
+                yield Path(dirpath, fn)
+
+
+def is_test_defined(test_name: str, root: Path) -> bool:
+    """True iff a function `test_name` is DEFINED (`def test_name(` / `async def …`) in some .py under root.
+    Word-bounded: `test_x` is not satisfied by `def test_x_slow`, nor by a mention in a comment."""
+    if not test_name:
+        return False
+    pat = re.compile(r"^\s*(?:async\s+)?def\s+" + re.escape(test_name) + r"\s*\(", re.MULTILINE)
+    for f in _iter_py_files(Path(root)):
+        try:
+            with open(f, "r", encoding="utf-8", errors="ignore") as fh:
+                if pat.search(fh.read()):
+                    return True
+        except OSError:                          # unreadable / broken symlink → skip, never crash
+            continue
+    return False
+
+
 def _test_absent(test_name: str, root: Path) -> bool:
     """The named test is NOT defined anywhere under root → it is genuinely red/absent today (red-first)."""
     if not test_name:
         return False
-    needle = f"def {test_name}"
-    for f in root.rglob("*.py"):
-        if "__pycache__" in str(f):
-            continue
-        try:
-            if needle in f.read_text(errors="ignore"):
-                return False
-        except OSError:
-            continue
-    return True
+    return not is_test_defined(test_name, root)
 
 
 def materialization_evidence(check, repo_root) -> Dict[str, bool]:

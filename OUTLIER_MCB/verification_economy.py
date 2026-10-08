@@ -142,14 +142,17 @@ class VerificationEconomy:
         """Settle `candidate` for the least honest cost: the cheapest TRUSTWORTHY proxy that CONFIRMS it (says
         YES) settles it as YES cheaply; otherwise the real resolver decides. A proxy NEVER settles a rejection
         or an uncertain case — those always escalate, so the economy cannot fabricate a pass."""
-        for name, proxy, cost in self._trustworthy_confirmers(min_precision, min_support):
+        spent = 0.0                              # HONEST accounting: every proxy actually run is paid for,
+        for name, proxy, cost in self._trustworthy_confirmers(min_precision, min_support):   # even if it fails
+            spent += cost
             if as_verdict(proxy, candidate):
-                return SettlementOutcome(verdict=True, settled_by=name, cost=cost, escalated=False,
+                return SettlementOutcome(verdict=True, settled_by=name, cost=round(spent, 10), escalated=False,
                                          why=f"trusted proxy '{name}' (precision "
                                              f"{self.calibrations[name].precision}) confirmed it cheaply.")
         v = as_verdict(self.real, candidate)
-        return SettlementOutcome(verdict=v, settled_by="real", cost=self.real_cost, escalated=True,
-                                 why="no trustworthy proxy-confirm → the real resolver settled it.")
+        return SettlementOutcome(verdict=v, settled_by="real", cost=round(spent + self.real_cost, 10), escalated=True,
+                                 why="no trustworthy proxy-confirm → the real resolver settled it"
+                                     + (f" (after {round(spent, 4)} spent on non-confirming proxies)." if spent else "."))
 
     def cost_saving(self, cases: Sequence, min_precision: float = 0.9, min_support: int = 5) -> Dict:
         """The MEASURED economy on `cases`: total cost of settling them all through the economy vs always

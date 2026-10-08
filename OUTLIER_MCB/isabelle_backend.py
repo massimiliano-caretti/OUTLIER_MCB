@@ -12,6 +12,7 @@ timeout ⇒ TOOL_LIMIT_UNKNOWN. Deterministic.
 """
 from __future__ import annotations
 import os
+import shutil
 import tempfile
 
 from ._solver_common import which, run_tool
@@ -50,12 +51,15 @@ def isabelle_backend(timeout_ms: int = 60000):
             return "TOOL_UNAVAILABLE", None, ("Isabelle not installed (`isabelle` not on PATH). The theory was "
                                               "generated (see detail).\n" + theory)
         tmp = tempfile.mkdtemp(prefix="mcb_isa_")
-        thy_path = os.path.join(tmp, "Scratch.thy")
-        with open(thy_path, "w") as f:
-            f.write(theory)
-        # batch-check the theory; a clean process (lemma discharged, no error) ⇒ checked proof
-        code, out, err, timed_out = run_tool(
-            [binary, "process", "-T", os.path.join(tmp, "Scratch")], timeout_s=timeout_s)
+        try:
+            thy_path = os.path.join(tmp, "Scratch.thy")
+            with open(thy_path, "w") as f:
+                f.write(theory)
+            # batch-check the theory; a clean process (lemma discharged, no error) ⇒ checked proof
+            code, out, err, timed_out = run_tool(
+                [binary, "process", "-T", os.path.join(tmp, "Scratch")], timeout_s=timeout_s)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)            # never leak one temp dir per lemma
         text = out + "\n" + err
         if timed_out:
             return "TOOL_LIMIT_UNKNOWN", None, f"Isabelle timed out after {timeout_s}s"

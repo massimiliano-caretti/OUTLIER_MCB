@@ -76,14 +76,20 @@ def thought_tree(problem: str, branching: int = 3, depth: int = 2, scorer: Optio
         from .creative_search import structural_evaluator
         scorer = structural_evaluator(pack, repo)
 
-    roots = generate_candidates(pack, problem)[:branching]
+    # score EVERY root and let the external scorer prune them — truncating the generator's list first meant
+    # the roots were simply its first `branching` items (all recombinations of the top assumption), unscored.
+    roots = generate_candidates(pack, problem)
     frontier = [ThoughtNode(c, float(scorer(c)), 0, [c.operator]) for c in roots]
     frontier = prune_by_external_score(frontier, branching)
     all_nodes = list(frontier)
+    seen = {n.candidate.name for n in all_nodes}
     for d in range(1, depth + 1):
         scored_children: List[ThoughtNode] = []
         for node in frontier:
             for ch in _children(node.candidate, pack):
+                if ch.name in seen:                 # a thought already in the tree is not a new branch: two
+                    continue                        # parents sharing an assumption yielded the SAME child twice
+                seen.add(ch.name)
                 scored_children.append(ThoughtNode(ch, float(scorer(ch)), d, node.path + [ch.operator]))
         if not scored_children:
             break

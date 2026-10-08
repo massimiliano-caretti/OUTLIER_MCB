@@ -4,6 +4,7 @@ Stops reincarnation: if an idea reduces to the same family as a buried one (in t
 failure_memory), it must state what it ACTUALLY breaks in addition, or inherit the death.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -31,7 +32,9 @@ def infer_family(idea_text: str, pack, family_guess: str = "") -> str:
         return family_guess
     t = (idea_text or "").lower()
     for f in pack.known_families:
-        if f.lower() in t or f.lower().replace("_", " ") in t:
+        # whole-word match (BUGFIX: a substring test matched 'gam' inside 'games', 'adam' inside 'madam')
+        if any(form and re.search(r"(?<!\w)" + re.escape(form) + r"(?!\w)", t)
+               for form in (f.lower(), f.lower().replace("_", " "))):
             return f
     return pack.known_families[0] if pack.known_families else "the standard approach"
 

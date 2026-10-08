@@ -173,14 +173,42 @@ def _sympy_prove(conj: Conjecture):
         diff = sympy.simplify(lhs - rhs)
         free = sorted({s.name for s in (lhs.free_symbols | rhs.free_symbols)})
         pred = None
-        if free:
-            f = sympy.lambdify([sympy.Symbol(n) for n in free], lhs - rhs, "math")
-            pred = lambda **kw: abs(f(*[kw[n] for n in free])) < 1e-9   # noqa: E731
+        sample_names = set(conj.variables or {}) or {"x"}           # what empirical_test will actually sample
+        if free and set(free) <= sample_names:
+            fl = sympy.lambdify([sympy.Symbol(n) for n in free], lhs, "math")
+            fr = sympy.lambdify([sympy.Symbol(n) for n in free], rhs, "math")
+
+            def pred(**kw):
+                # RELATIVE tolerance: an absolute 1e-9 turns float round-off at large magnitudes into a
+                # false 'counterexample' to a true identity.
+                a, b = fl(*[kw[n] for n in free]), fr(*[kw[n] for n in free])
+                return abs(a - b) <= 1e-9 * max(1.0, abs(a), abs(b))
         if diff == 0:
             return ProofAttempt("sympy", "FORMALLY_PROVED", f"simplify(lhs - rhs) = 0 over {free or 'constants'}."), pred
         return ProofAttempt("sympy", "NOT_AN_IDENTITY", f"simplify(lhs - rhs) = {diff} ≠ 0."), pred
     except Exception as exc:
         return ProofAttempt("sympy", "ATTEMPTED", f"SymPy could not decide: {exc}"), None
+
+
+_SAFE_AST_NODES = (ast.Expression, ast.BoolOp, ast.BinOp, ast.UnaryOp, ast.Compare, ast.Call, ast.Name, ast.Load,
+                   ast.Constant, ast.IfExp, ast.And, ast.Or, ast.Not, ast.UAdd, ast.USub, ast.Add, ast.Sub, ast.Mult,
+                   ast.Div, ast.FloorDiv, ast.Mod, ast.Pow, ast.Eq, ast.NotEq, ast.Lt, ast.LtE, ast.Gt, ast.GtE)
+
+
+def _check_safe_expr(expr: str) -> None:
+    """Raise ValueError unless `expr` is a plain arithmetic/logic expression: names, numeric constants,
+    operators, comparisons and calls of PLAIN names (And/Or/Abs/...). No attributes, subscripts, strings,
+    lambdas, comprehensions or dunder names — so `eval` of it cannot reach Python internals."""
+    tree = ast.parse(str(expr), mode="eval")
+    for node in ast.walk(tree):
+        if not isinstance(node, _SAFE_AST_NODES):
+            raise ValueError(f"unsupported syntax {type(node).__name__!s} in {expr!r}")
+        if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float, bool)):
+            raise ValueError(f"only numeric constants are allowed in {expr!r}")
+        if isinstance(node, ast.Name) and node.id.startswith("_"):
+            raise ValueError(f"private name {node.id!r} is not allowed")
+        if isinstance(node, ast.Call) and (not isinstance(node.func, ast.Name) or node.keywords):
+            raise ValueError(f"only plain function calls are allowed in {expr!r}")
 
 
 def z3_backend(timeout_ms: int = 5000):
@@ -200,6 +228,10 @@ def z3_backend(timeout_ms: int = 5000):
         env = {n: mk(n) for n in names}
         env.update({"And": z3.And, "Or": z3.Or, "Not": z3.Not, "Implies": z3.Implies, "Abs": lambda e: z3.If(e >= 0, e, -e)})
         try:
+            # SECURITY: `eval` with empty builtins is NOT a sandbox (attribute/dunder walks escape it), so every
+            # expression is first checked against the plain arithmetic/logic fragment.
+            for src in ([conj.claim_expr] if conj.claim_expr else [conj.lhs, conj.rhs]) + list(conj.hypotheses or []):
+                _check_safe_expr(src)
             if conj.claim_expr:
                 claim = eval(conj.claim_expr, {"__builtins__": {}}, env)   # noqa: S307 — math expr, no builtins
             else:
@@ -209,10 +241,13 @@ def z3_backend(timeout_ms: int = 5000):
             return "TOOL_LIMIT_UNKNOWN", None, f"could not parse the claim into Z3: {exc}"
         solver = z3.Solver()
         solver.set("timeout", timeout_ms)
-        for h in hyps:
-            solver.add(h)
-        solver.add(z3.Not(claim))                          # prove hyps ⇒ claim  ⟺  UNSAT(hyps ∧ ¬claim)
-        result = solver.check()
+        try:
+            for h in hyps:
+                solver.add(h)
+            solver.add(z3.Not(claim))                      # prove hyps ⇒ claim  ⟺  UNSAT(hyps ∧ ¬claim)
+            result = solver.check()
+        except Exception as exc:                           # e.g. a non-Boolean claim ('x + 1'): never a crash
+            return "TOOL_LIMIT_UNKNOWN", None, f"Z3 could not pose the claim as a Boolean formula: {exc}"
         if result == z3.unsat:
             return "FORMALLY_PROVED", None, "Z3: the negation is unsatisfiable under the hypotheses → proved."
         if result == z3.sat:
@@ -422,8 +457,56 @@ def _exhaustive_numeric(lemma: Conjecture, predicate: Optional[Callable],
         return LemmaCertificate("UNKNOWN_TIMEOUT", "hypotheses have no witness in the finite integer box",
                                 method="exhaustive_numeric")
     checked = witness_count if hypothesis_predicate is not None else total
-    return LemmaCertificate("NUMERIC_VERIFIED", f"exhaustive over {checked} relevant integer point(s) — all held",
-                            method="exhaustive_numeric")
+    caveat = ""
+    if (lemma.domain or "real") != "int" and getattr(predicate, "_outlier_from_claim", False):
+        # SOUNDNESS: the lemma ranges over the REALS but only integer points were enumerated (x**2 >= x holds on
+        # {0, 1} yet fails at 1/2). Probe an exact rational grid between the integers; any failure refutes.
+        refuted = _rational_grid_refutation(lemma, predicate)
+        if refuted is not None:
+            return refuted
+        caveat = (" (domain is REAL: integer points + an exact rational grid probe held — this certifies those "
+                  "points, it is not a proof over the reals)")
+    return LemmaCertificate("NUMERIC_VERIFIED", f"exhaustive over {checked} relevant integer point(s) — all held"
+                            + caveat, method="exhaustive_numeric")
+
+
+def _rational_grid_refutation(lemma: Conjecture, predicate: Callable, steps: int = 4,
+                              max_points: int = 20_000) -> Optional[LemmaCertificate]:
+    """Refutation-only probe of a real-domain lemma on the exact rational grid {i + j/steps} ∪ box endpoints.
+    Returns NUMERIC_REFUTED with the (exact) counterexample, or None if every probed point held."""
+    import itertools
+    names = list(lemma.variables or {})
+    grids = []
+    for n in names:
+        lo, hi = Fraction(str(lemma.variables[n][0])), Fraction(str(lemma.variables[n][1]))
+        pts = {lo, hi}
+        for i in range(int(math.floor(lo)), int(math.ceil(hi)) + 1):
+            for j in range(1, steps):
+                q = Fraction(i) + Fraction(j, steps)
+                if lo <= q <= hi:
+                    pts.add(q)
+        grids.append(sorted(pts))
+    total = 1
+    for g in grids:
+        total *= len(g)
+    if total <= max_points:
+        combos = itertools.product(*grids)
+    else:                                                  # deterministic sub-sample of a huge grid
+        rng = random.Random(0)
+        combos = (tuple(rng.choice(g) for g in grids) for _ in range(max_points))
+    for combo in combos:
+        assign = dict(zip(names, combo))
+        try:
+            ok = bool(predicate(**assign))
+        except Exception as exc:
+            return LemmaCertificate("NUMERIC_REFUTED", f"predicate raised at real point {assign}: {exc}",
+                                    counterexample={k: str(v) for k, v in assign.items()},
+                                    method="exhaustive_numeric+rational_grid")
+        if not ok:
+            return LemmaCertificate("NUMERIC_REFUTED", f"predicate false at real (non-integer) point {assign}",
+                                    counterexample={k: str(v) for k, v in assign.items()},
+                                    method="exhaustive_numeric+rational_grid")
+    return None
 
 
 _BIN_OPS = {ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
@@ -505,6 +588,7 @@ def _predicate_from_claim_expr(conj: Conjecture) -> Optional[Callable]:
 
     if hyp_trees:
         pred._outlier_hypothesis_predicate = hypotheses_hold
+    pred._outlier_from_claim = True
 
     return pred
 

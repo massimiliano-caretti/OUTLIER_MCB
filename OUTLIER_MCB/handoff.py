@@ -29,7 +29,10 @@ _REQUIRED = ("idea", "broken_assumption", "world_test", "claim")
 # markers of a real falsification test: a condition under which the idea would FAIL (baseline/kill/control)
 _KILL_MARKERS = ("fail", "falsif", "kill", "counterexample", "counter-example", "control", "baseline",
                  "worse", "does not", "would break", "breaks if", "unless", "reject", "collapse", "refut",
-                 "must not", "should not", "drop", "no better than")
+                 "must not", "should not", "drop", "no better than",
+                 # Italian (the contract is bilingual EN+IT): fallisce/fallire, controesempio, peggio, smentisce…
+                 "fallisc", "fallir", "fallimento", "controesempio", "contro-esempio", "peggio", "peggior",
+                 "smentis", "rifiut", "non supera", "non deve", "crolla", "a meno che", "confutat")
 
 
 def _content_tokens(s) -> set:
@@ -115,6 +118,8 @@ def accept_handoff(output: Dict, contract: Dict, pack=None, evidence: Optional[D
     if j.verdict == "INSIDE_THE_BOX":
         step = (j.next_step or "breaks no axis")
         reasons.append(f"INSIDE_THE_BOX — the idea reduces to the average answer ({str(step)[:70]})")
+    elif j.verdict == "DEAD_BY_BARRIER":            # a no-go theorem closes the route: never accept + receipt it
+        reasons.append(f"DEAD_BY_BARRIER — the route is proven dead ({str(j.next_step)[:90]})")
     # SUBSTANCE 2 — the declared broken assumption must be real and (when a pack grounds the detected break)
     # consistent with it. Without a pack, judge's broken_assumption is a generic axis label, too coarse to
     # enforce token-consistency against a domain-specific statement — so we only check it references the idea.

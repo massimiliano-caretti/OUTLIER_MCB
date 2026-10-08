@@ -13,6 +13,15 @@ training memory — you break a hidden assumption and let falsification certify 
 > `python -m OUTLIER_MCB route --problem "<request>" --json` each turn and follow `activate`, `entrypoint`,
 > and `next_call`. This contract is bilingual: English + Italian / inglese + italiano.
 
+## STEP 0 — ANTI-MODE (name your own default answer, then leave it)
+
+Before inventing, write the 3–5 answers you would MOST LIKELY give (one concrete mechanism each, with p). What
+they share is THIS request's box — request-specific, unlike the generic pack. Then:
+`python -m OUTLIER_MCB mode --problem "<request>" --answer "<d1>" --answer "<d2>" --answer "<d3>"` → the breaks;
+`m.judge(idea, prompt=request, mode=[d1, d2, d3])` → a `MODE_ECHO`/`NEAR_MODE` idea (a component swap of a default
+answer) is `INSIDE_THE_BOX`; only `TAIL` ideas may go on to the world-test and prior-art audit. TAIL is necessary,
+never sufficient. / Passo 0: scrivi prima le tue risposte di default; ogni idea finale deve essere TAIL.
+
 ## AUTO-ACTIVATION (do this without being asked)
 
 When the user's request contains any **creativity trigger** — in any language —

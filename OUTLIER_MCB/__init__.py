@@ -374,6 +374,9 @@ __all__ = [
 
 # Building blocks — importable by name, not in the headline API. Listed here so they are discoverable.
 __toolbox__ = [
+    # anti-mode: leave YOUR OWN declared default answer (step 0 of the routine)
+    "anti_mode_protocol", "mode_brief", "declare_mode", "mode_distance", "mode_pack", "ModeMap", "ModeDistance",
+    "MODE_VERDICTS",
     # routing evidence
     "select_pack", "route_pack", "RouteDecision", "pack_quality",
     # kernel + scoring
@@ -588,6 +591,10 @@ __toolbox__ = [
     "PreflightResult", "MissingInfo", "BreakOption", "HiddenAssumption",
 ]
 
+# ── anti-mode: the model's own declared default answers become the request-specific box to leave ──
+from .mode_box import (declare_mode, mode_pack, mode_distance, mode_brief, anti_mode_protocol, ModeMap,
+                       ModeDistance, MODE_VERDICTS)
+
 # A small glossary so the method's vocabulary is documented, not hidden (the terms are load-bearing,
 # like 'gradient' in optimization — but the OUTPUT and these definitions speak plainly).
 GLOSSARY = {
@@ -597,5 +604,7 @@ GLOSSARY = {
     "death_gate": "the conditions under which any idea is rejected (reducible / no signal / leakage).",
     "anti_collage": "the rule that combining known mechanisms is not novelty unless it beats its parts.",
     "box_distance": "how unlike the average answer a candidate is — the anti-loss-function metric.",
+    "mode": "the model's own most-likely answers to a request, declared up front; what they share is the box.",
+    "TAIL": "an idea that drops a shared feature of the declared mode and is far from every typical answer.",
     "bet": "the unit of output: a claim + the test that settles it + what you'd stake (see economy.py).",
 }

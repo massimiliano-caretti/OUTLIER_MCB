@@ -142,10 +142,22 @@ def extrapolation(candidate, prompt: str = "") -> float:
     declares AND references no known family — genuinely outside the global convex hull (green-star).
     Distinguishes interpolation (novel within a domain) from extrapolation (novel beyond every domain)."""
     text = (candidate.negation or "").lower()
-    novel_axis = bool(candidate.breaks) and all(ax not in _known_axes() for ax in candidate.breaks)
+    known_axes = _known_axes()                       # once, not once per broken axis
+    novel_axis = bool(candidate.breaks) and all(ax not in known_axes for ax in candidate.breaks)
     fams = global_families()
-    no_family = not any(f in text or f.replace("_", " ") in text for f in fams)
+    # BUGFIX: WHOLE-WORD family matching — a substring test fired 'adam' inside 'madam', 'gam' inside 'games',
+    # 'sgd'/'gpy' inside longer words, silently docking extrapolation for families the idea never mentions.
+    no_family = not any(_mentions_family(text, f) for f in fams)
     return round(0.6 * novel_axis + 0.4 * no_family, 2)
+
+
+def _mentions_family(text: str, family: str) -> bool:
+    """True iff `family` (or its underscore→space form) occurs in `text` as a whole word/phrase."""
+    import re
+    for form in {family, family.replace("_", " ")}:
+        if form and re.search(r"(?<!\w)" + re.escape(form) + r"(?!\w)", text):
+            return True
+    return False
 
 
 UNFALSIFIED_HYPOTHESIS = "UNFALSIFIED_HYPOTHESIS"   # the only status green-star may claim — never 'novel'

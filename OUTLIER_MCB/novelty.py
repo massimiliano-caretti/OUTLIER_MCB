@@ -31,6 +31,29 @@ def _jaccard(a: set, b: set) -> float:
     return round(len(a & b) / len(a | b), 3) if (a or b) else 0.0
 
 
+def _sim(m: Dict) -> float:
+    """A match's similarity as a float in [0,1]. A provider may leave it None (the stdlib online providers do)
+    or send garbage — that must never crash a detector nor read as 'no similarity' by accident."""
+    try:
+        v = float(m.get("similarity") or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
+    return min(1.0, max(0.0, v)) if v == v else 0.0          # NaN → 0
+
+
+def _provider_similarity(raw_sim, fallback: float) -> float:
+    """Clamp a provider-supplied similarity into [0,1]; non-numeric / NaN falls back to the lexical value."""
+    if raw_sim is None:
+        return fallback
+    try:
+        v = float(raw_sim)
+    except (TypeError, ValueError):
+        return fallback
+    if v != v:                                                # NaN
+        return fallback
+    return min(1.0, max(0.0, v))
+
+
 # the GRADED novelty scale (scientific honesty: never claim absolute novelty — only a defensible degree).
 GRADED_VERDICTS = ("RENAMED_PRIOR_ART", "COLLAGE_OF_PRIOR_ART", "WEAKLY_NOVEL",
                    "PROVISIONALLY_NOVEL", "VERIFIED_USEFUL_NOVELTY")
@@ -119,14 +142,18 @@ def novelty_audit(idea: str, provider, pack=None,
     return rich `matches` (with summaries / its own similarity) or plain `sources`; either works."""
     res = provider.research(idea) or {}
     raw = res.get("matches") or [{"title": s.get("title", ""), "url": s.get("url", ""), "summary": ""}
-                                 for s in res.get("sources", [])]
+                                 if isinstance(s, dict) else {"title": str(s), "url": "", "summary": ""}
+                                 for s in (res.get("sources") or [])]
+    raw = [m if isinstance(m, dict) else {"title": str(m), "url": "", "summary": ""} for m in raw]
     idea_tok = _tokens(idea)
     matches = []
     for m in raw:
-        sim = m.get("similarity")
-        if sim is None:
-            sim = _jaccard(idea_tok, _tokens(f"{m.get('title', '')} {m.get('summary', '')}"))
-        matches.append({"title": m.get("title", ""), "url": m.get("url", ""), "similarity": float(sim)})
+        lexical = _jaccard(idea_tok, _tokens(f"{m.get('title', '')} {m.get('summary', '')}"))
+        # the summary is KEPT on each match so the graded audit (prior_art_audit) sees the same evidence for
+        # collage detection — dropping it made a COLLAGE here read as PROVISIONALLY_NOVEL there.
+        matches.append({"title": m.get("title", "") or "", "url": m.get("url", "") or "",
+                        "summary": m.get("summary", "") or "",
+                        "similarity": _provider_similarity(m.get("similarity"), lexical)})
     matches.sort(key=lambda x: -x["similarity"])
 
     top = matches[0]["similarity"] if matches else 0.0
@@ -149,6 +176,8 @@ def novelty_audit(idea: str, provider, pack=None,
     confidence = round(top if status != "NO_PRIOR_ART_FOUND" else max(0.0, 1.0 - top), 2)
     return NoveltyVerdict(idea=idea, status=status, confidence=confidence, closest_matches=matches[:5],
                           sources_searched=len(matches), provisional=provisional, why=why,
+                          # coverage over ALL sources (not only the top-5 kept above) — the collage evidence
+                          source_overlap_score=coverage,
                           # provenance flows through from a scope-aware provider (CompositePriorArtProvider);
                           # an old provider supplies none → novelty_scope stays "" and nothing is gated.
                           novelty_scope=str(res.get("novelty_scope", "")),
@@ -191,7 +220,7 @@ def world_novelty_score(idea: str, provider) -> float:
 # ── Impl 2: a STRONGER, graded prior-art audit ─────────────────────────────────────────────────────────
 def prior_art_distance_score(matches: List[Dict]) -> float:
     """[0,1]: 1 − the single closest prior-art similarity. 1 = far from everything found, 0 = exact match."""
-    top = max((m.get("similarity", 0.0) for m in matches), default=0.0)
+    top = max((_sim(m) for m in matches), default=0.0)
     return round(max(0.0, 1.0 - float(top)), 3)
 
 
@@ -207,12 +236,12 @@ def source_overlap_score(idea: str, matches: List[Dict]) -> float:
 
 def rebranding_detector(matches: List[Dict], threshold: float = 0.55) -> bool:
     """True when a SINGLE existing work matches closely — a likely rename of prior art."""
-    return max((m.get("similarity", 0.0) for m in matches), default=0.0) >= threshold
+    return max((_sim(m) for m in matches), default=0.0) >= threshold
 
 
 def collage_detector(idea: str, matches: List[Dict], coverage: float = 0.7, min_top: float = 0.25) -> bool:
     """True when no single source matches but the UNION covers the idea — a likely collage of prior art."""
-    top = max((m.get("similarity", 0.0) for m in matches), default=0.0)
+    top = max((_sim(m) for m in matches), default=0.0)
     return source_overlap_score(idea, matches) >= coverage and top >= min_top
 
 
@@ -232,12 +261,15 @@ def prior_art_audit(idea: str, provider, pack=None, verifier_passed: bool = None
     nv = novelty_audit(idea, provider, pack=pack)
     matches = nv.closest_matches
     dist = prior_art_distance_score(matches)
-    overlap = source_overlap_score(idea, matches)
+    # BUGFIX: closest_matches is truncated to the top 5, so recomputing overlap from it alone under-counts the
+    # union of sources. Use the full-source coverage novelty_audit measured, so a COLLAGE there can never be
+    # upgraded to PROVISIONALLY_NOVEL here.
+    overlap = max(source_overlap_score(idea, matches), float(nv.source_overlap_score or 0.0))
     top = matches[0]["similarity"] if matches else 0.0
 
     if rebranding_detector(matches):
         graded = "RENAMED_PRIOR_ART"
-    elif collage_detector(idea, matches):
+    elif nv.status == "COLLAGE" or (overlap >= 0.7 and top >= 0.25):
         graded = "COLLAGE_OF_PRIOR_ART"
     elif top >= 0.35 or overlap >= 0.45:
         graded = "WEAKLY_NOVEL"
@@ -259,7 +291,12 @@ def prior_art_audit(idea: str, provider, pack=None, verifier_passed: bool = None
         nv.why = (nv.why + f" [scope={scope}: no successful ONLINE prior-art search, so {was} is NOT warranted "
                   "— downgraded to WEAKLY_NOVEL.]")
 
-    key_terms = sorted(_tokens(idea))[:6]
+    # the most SPECIFIC content words (longest first, ties in order of appearance) — BUGFIX: alphabetical order
+    # picked e.g. 'adaptive, aware, bucket…' and dropped the distinctive terms from the refuting query.
+    words = "".join(c if c.isalnum() else " " for c in (idea or "").lower()).split()
+    order = {w: i for i, w in reversed(list(enumerate(words)))}
+    key_terms = sorted(_tokens(idea), key=lambda w: (-len(w), order.get(w, 0)))[:6]
+    key_terms.sort(key=lambda w: order.get(w, 0))                  # restore reading order for the query
     falsification_query = (f"search for: {' '.join(key_terms)} (web / arXiv / GitHub). A single result with "
                            f"similarity ≥ 0.55 REFUTES this as RENAMED_PRIOR_ART; broad coverage by several "
                            f"results REFUTES it as COLLAGE_OF_PRIOR_ART.")

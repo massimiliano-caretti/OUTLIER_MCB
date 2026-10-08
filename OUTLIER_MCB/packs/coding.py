@@ -56,7 +56,10 @@ PACK = DomainPack(
     name="coding",
     keywords=["rate limit", "rate-limit", "scheduler", "scheduling", "throttle", "api gateway",
               "distributed", "fairness", "tenant", "latency", "queue", "load balanc", "backpressure",
-              "algorithm for", "concurrency"],
+              "algorithm for", "concurrency",
+              # Italian (the assistant contract is bilingual EN+IT)
+              "limitatore", "limitazione di frequenza", "pianificatore", "schedulatore", "bilanciamento del carico",
+              "contropressione", "latenza", "concorrenza", "equità", "distribuit", "algoritmo per"],
     box_name="the standard token/leaky/window limiter family (per-request, per-tenant, time-windowed)",
     assumptions=A,
     relations=_edges,

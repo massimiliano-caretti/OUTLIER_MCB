@@ -221,9 +221,16 @@ class CrossrefProvider(OnlinePriorArtProvider):
             out.append(PriorArtResult(
                 title=title, summary=(it.get("abstract", "") or "")[:600], url=it.get("URL", ""),
                 source=self.name, source_type=self.source_type,
-                published_at="-".join(str(p) for p in (it.get("published", {}).get("date-parts", [[None]])[0] or [])),
-                retrieved_at=_now()))
+                published_at=self._date(it), retrieved_at=_now()))
         return out
+
+    @staticmethod
+    def _date(item: Dict) -> str:
+        """Crossref 'date-parts' can be missing, empty ([]) or [[None]]; one malformed item must not turn the
+        whole provider into a failed source (an IndexError used to be raised here)."""
+        parts = (item.get("published") or {}).get("date-parts") or []
+        first = parts[0] if parts and isinstance(parts[0], (list, tuple)) else []
+        return "-".join(str(p) for p in first if p is not None)
 
 
 class GitHubCodeSearchProvider(OnlinePriorArtProvider):
@@ -306,10 +313,14 @@ class CachedPriorArtProvider(PriorArtProvider):
     is DOWNGRADED to INCOMPLETE_ONLINE_SEARCH and a warning is attached, so a stale cache can never
     masquerade as a fresh successful search (and the audit's gate then blocks strong novelty).
 
-    `clock` is injectable for deterministic tests; `store` lets a caller persist the cache."""
-    def __init__(self, inner: PriorArtProvider, ttl_seconds: float = 86400.0, clock=None, store=None):
+    `clock` is injectable for deterministic tests; `store` lets a caller persist the cache. `max_entries` bounds
+    the store (oldest entries evicted first) so a long-running process cannot grow it without limit. A failed
+    refresh with no prior entry is NEVER cached — a transient outage must not pin a failure for the whole TTL."""
+    def __init__(self, inner: PriorArtProvider, ttl_seconds: float = 86400.0, clock=None, store=None,
+                 max_entries: int = 1024):
         self.inner = inner
         self.ttl = ttl_seconds
+        self.max_entries = max_entries
         self.name = f"cached:{inner.name}"
         self.is_online = getattr(inner, "is_online", False)
         self._clock = clock or _wall_clock
@@ -339,6 +350,17 @@ class CachedPriorArtProvider(PriorArtProvider):
         res.setdefault("retrieved_at", _now())
         return res
 
+    def _evict(self) -> None:
+        """Keep the store bounded: drop the oldest entries beyond `max_entries` (None/0 ⇒ unbounded)."""
+        if not self.max_entries or len(self._store) <= self.max_entries:
+            return
+        try:
+            oldest = sorted(self._store, key=lambda k: self._store[k].get("cached_at", 0.0))
+        except Exception:                                   # an exotic caller-supplied store: never crash a search
+            return
+        for k in oldest[:len(self._store) - self.max_entries]:
+            self._store.pop(k, None)
+
     def research(self, query: str, force_refresh: bool = False) -> Dict:
         now = self._clock()
         ent = self._store.get(query)
@@ -360,7 +382,11 @@ class CachedPriorArtProvider(PriorArtProvider):
                        stale_warning=f"served STALE cache ({age}s old); live refresh failed → scope downgraded "
                                      "to INCOMPLETE_ONLINE_SEARCH (no strong novelty from unconfirmed data).")
             return out
-        self._store[query] = {"result": fresh, "cached_at": now}
+        if fresh.get("novelty_scope") != "INCOMPLETE_ONLINE_SEARCH":
+            # BUGFIX: only a search that actually answered is cached; caching a failure served it (as a cache
+            # hit, without retrying) for the whole TTL after the network came back.
+            self._store[query] = {"result": fresh, "cached_at": now}
+            self._evict()
         out = self._normalize(fresh)
         out.update(from_cache=False, cache_age_seconds=0.0, stale=False)
         return out

@@ -46,7 +46,10 @@ _edges = [
 PACK = DomainPack(
     name="math",
     keywords=["theorem", "convergence", "non-convex", "nonconvex", "gradient", "optimization",
-              "smoothness", "lipschitz", "proof", "bound", "rate of convergence", "lemma", "manifold"],
+              "smoothness", "lipschitz", "proof", "bound", "rate of convergence", "lemma", "manifold",
+              # Italian (the assistant contract is bilingual EN+IT)
+              "teorema", "convergenza", "non convesso", "non-convesso", "nonconvesso", "gradiente",
+              "ottimizzazione", "dimostrazione", "limite superiore", "velocità di convergenza", "varietà riemanniana"],
     box_name="first-order Euclidean descent under L-smoothness (GD/SGD/Adam)",
     assumptions=A,
     relations=_edges,

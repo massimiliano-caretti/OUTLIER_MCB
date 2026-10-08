@@ -29,6 +29,11 @@ def _tokens(text: str):
     return {w for w in "".join(c if c.isalnum() else " " for c in str(text).lower()).split() if len(w) > 3}
 
 
+def _all_tokens(text: str):
+    """Every alphanumeric token, short ones included — the fallback when neither text has a >3-char word."""
+    return set("".join(c if c.isalnum() else " " for c in str(text).lower()).split())
+
+
 class LexicalEmbedder:
     """The default, deterministic, zero-dependency distance: 1 − token-set Jaccard. Sees shared WORDS, not
     shared meaning — a paraphrase with different words reads as 'far'. Good enough as a baseline; swap in a
@@ -38,7 +43,11 @@ class LexicalEmbedder:
     def distance(self, a: str, b: str) -> float:
         ta, tb = _tokens(a), _tokens(b)
         if not ta and not tb:
-            return 0.0
+            # BUGFIX: two texts made only of short words ('GPU' vs 'CPU', 'a b c' vs 'x y z') used to be
+            # distance 0 — read as IDENTICAL. Fall back to every token; only truly equal content is 0.
+            ta, tb = _all_tokens(a), _all_tokens(b)
+            if not ta and not tb:
+                return 0.0
         return round(1.0 - len(ta & tb) / len(ta | tb), 4)
 
 
@@ -56,14 +65,17 @@ class CallableEmbedder:
     library never imports the model; the caller owns it (determinism/offline are the caller's choice here)."""
     kind = "semantic"
 
-    def __init__(self, fn: Callable[[str], List[float]], cache: bool = True):
+    def __init__(self, fn: Callable[[str], List[float]], cache: bool = True, max_cache: int = 10000):
         self.fn = fn
         self._cache = {} if cache else None
+        self.max_cache = max_cache            # bound the memo so a long-running process cannot grow it forever
 
     def _embed(self, text: str) -> List[float]:
         if self._cache is None:
             return list(self.fn(text))
         if text not in self._cache:
+            if self.max_cache and len(self._cache) >= self.max_cache:
+                self._cache.pop(next(iter(self._cache)))          # evict the oldest (FIFO)
             self._cache[text] = list(self.fn(text))
         return self._cache[text]
 
@@ -106,6 +118,8 @@ class NgramEmbedder:
 
     def distance(self, a: str, b: str) -> float:
         ta, tb = _tokens(a), _tokens(b)
+        if not ta and not tb:                       # short-word-only texts: compare every token, not ∅ vs ∅ (=1.0)
+            ta, tb = _all_tokens(a), _all_tokens(b)
         sa, sb = {_stem(w) for w in ta}, {_stem(w) for w in tb}
         ca, cb = _char_ngrams(a), _char_ngrams(b)
         sim = self.w_token * _jaccard(ta, tb) + self.w_char * _jaccard(ca, cb) + self.w_stem * _jaccard(sa, sb)

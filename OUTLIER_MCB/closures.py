@@ -182,7 +182,9 @@ def reduces_to_closure(candidate, closure) -> str:
 def closure_membership(candidate, pack) -> Dict:
     """Check a candidate against EVERY universal closure the pack declares (FIX A hard rule). If it is INSIDE
     any declared closure → INSIDE_THE_BOX, regardless of how different it looks from a single member."""
-    declared = list(getattr(pack, "universal_closures", []) or [])
+    # closure names are case-insensitive keys of CLOSURE_REGISTRY: reduces_to_closure() upper-cases them, so the
+    # verdict lookups below must too — a pack declaring "deepsets" used to raise KeyError from judge().
+    declared = [str(n).upper() for n in (getattr(pack, "universal_closures", []) or [])]
     inside_of, outside_of, unknown_of = [], [], []
     for name in declared:
         v = reduces_to_closure(candidate, name)
@@ -238,7 +240,9 @@ def architectural_novelty(candidate, pack, evidence: Optional[Dict] = None) -> D
         state = "NOT_YET_NOVEL"
         md = ("- verdict: **NOT YET NOVEL — closure-escape mancante**. Prove the idea is OUTSIDE every declared "
               "universal closure and run a REAL prior-art search before any such claim. Admissible exits: "
-              + ", ".join(CLOSURE_REGISTRY[c].exits[0] for c in (getattr(pack, "universal_closures", []) or []) if c in CLOSURE_REGISTRY) + ".")
+              + ", ".join(CLOSURE_REGISTRY[c].exits[0]
+                          for c in (str(n).upper() for n in (getattr(pack, "universal_closures", []) or []))
+                          if c in CLOSURE_REGISTRY) + ".")
     elif can_say_novel and transfer:
         state, md = "ALIVE_ARCHITECTURAL", "- verdict: **ALIVE_ARCHITECTURAL** — closure-escape proven, transfer-test passed, prior-art checked."
     elif can_say_novel:

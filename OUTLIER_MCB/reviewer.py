@@ -6,6 +6,7 @@ experiment that would defend it, and the strict claim envelope (max allowed / fo
 domain content comes from the pack (known_families, failure_memory); nothing is hard-coded.
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
@@ -37,7 +38,9 @@ class AttackCard:
 def _guess_family(idea: str, pack) -> str:
     t = (idea or "").lower()
     for f in pack.known_families:
-        if f.lower() in t or f.lower().replace("_", " ") in t:
+        # whole-word match (BUGFIX: a substring test matched 'gam' inside 'games', 'adam' inside 'madam')
+        if any(form and re.search(r"(?<!\w)" + re.escape(form) + r"(?!\w)", t)
+               for form in (f.lower(), f.lower().replace("_", " "))):
             return f
     return pack.known_families[0] if pack.known_families else "the standard approach"
 

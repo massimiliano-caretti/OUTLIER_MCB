@@ -16,6 +16,7 @@ Detectors are explicit and structural (no learned magic), mirroring closures.py:
 route, and explicit ESCAPE signals that mean the idea already takes an admissible exit (the negative control).
 """
 from __future__ import annotations
+import re
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -39,7 +40,10 @@ _TWIN_TARGET = ("twin prime", "twin primes", "primi gemelli", "gemelli", "gap 2"
 _PARITY_ESCAPES = ("parity-breaking", "parity breaking", "break parity", "breaks parity", "breaking parity",
                    "automorphic", "gl(2)", "gl2", "l-function", "l function", "spectral", "bilinear",
                    "exponential sum", "exponential-sum", "kloosterman", "new observable", "non-sieve observable",
-                   "bounded gap", "bounded gaps", "finite bound", "gap finito", "limitato", "h finite", "h finito")
+                   "bounded gap", "bounded gaps", "finite bound", "gap finito", "gap limitato", "gap limitati",
+                   "h finite", "h finito")
+# NB: a bare 'limitato' was an escape — but "un crivello LIMITATO ai primi gemelli" (a sieve RESTRICTED to twin
+# primes) is the dead route itself; only a bounded/finite GAP objective is the Maynard–Tao exit.
 
 
 def _detect_parity(text: str) -> str:
@@ -59,17 +63,36 @@ _THERMO_DEAD = ("perpetual motion", "perpetuum mobile", "moto perpetuo", "over-u
                 "more energy out than in", "net energy from a closed", "net work from a closed",
                 "net work from an isolated", "creates energy", "destroys entropy", "violates conservation of energy",
                 "100% efficient closed", "self-powered", "self powered")
-_THERMO_ESCAPES = ("open system", "external energy", "energy input", "power source", "from a reservoir",
-                   "temperature gradient", "thermal gradient", "heat bath", "not a closed", "not closed",
-                   "external source", "draws energy", "fuel", "battery", "ambient gradient", "extracts from",
-                   "work from a gradient", "input power", "driven", "forcing", "pump")
+_THERMO_ESCAPES = ("open system", "open reactor", "external energy", "energy input", "power source",
+                   "from a reservoir", "temperature gradient", "thermal gradient", "heat bath", "not a closed",
+                   "not closed", "external source", "draws energy", "fuel", "battery", "ambient gradient",
+                   "extracts from", "work from a gradient", "input power", "externally driven",
+                   "driven by an external", "driven by heat", "driven by a gradient", "external forcing",
+                   "periodic forcing", "heat pump", "energy harvesting", "harvests", "harvesting",
+                   "sistema aperto", "fonte esterna", "gradiente di temperatura", "batteria", "carburante",
+                   "combustibile", "pompa di calore")
+# These are matched WHOLE-WORD (see _has): bare substrings 'driven' / 'pump' / 'forcing' let "a perpetual motion
+# machine DRIVEN by magnets" or "a self-powered wheel with a PUMP" escape the barrier — a fabricated NOT_BLOCKED,
+# the most dangerous error this gate can make.
+# Thermodynamic POTENTIALS named "free energy" are ordinary physics, not an over-unity claim: strip them before
+# the dead-route check, so "minimize the Gibbs free energy" is not DEAD_BY_BARRIER.
+_FREE_ENERGY_POTENTIAL = re.compile(
+    r"(?:gibbs|helmholtz|landau|variational|binding|activation|surface|configurational|landau-ginzburg)\s+"
+    r"free[\s-]+energ(?:y|ies)|free[\s-]+energy\s+(?:principle|landscape|surface|profile|minimi[sz]ation|"
+    r"perturbation|calculation|difference|functional|of\s+(?:the|a|an|mixing|binding|formation|activation))")
+
+
+def _has(low: str, signals) -> bool:
+    """Whole-word signal membership (unicode-aware): 'pump' must not fire inside 'pumpkin', 'fuel' not inside
+    'refuel…' fragments, and multi-word signals still match across their single spaces."""
+    return any(re.search(r"(?<!\w)" + re.escape(sig) + r"(?!\w)", low) for sig in signals)
 
 
 def _detect_thermo(text: str) -> str:
-    low = text.lower()
-    if any(s in low for s in _THERMO_ESCAPES):
+    low = _FREE_ENERGY_POTENTIAL.sub(" ", text.lower())
+    if _has(low, _THERMO_ESCAPES):
         return NOT_BLOCKED                               # an OPEN system / external drive — a legitimate exit
-    if any(s in low for s in _THERMO_DEAD):
+    if _has(low, _THERMO_DEAD):
         return DEAD_BY_BARRIER                           # net output from a closed system → 1st/2nd law kills it
     return UNKNOWN
 

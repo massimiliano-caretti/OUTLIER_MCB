@@ -59,14 +59,21 @@ def push_further(candidate: Candidate, pack) -> Candidate:
     """Self-Refine, inverted: return a STRICTLY farther-from-box successor, or the candidate unchanged.
     Refinement that regresses toward the acceptable is rejected by construction."""
     name = candidate.assumptions[0] if candidate.assumptions else None
-    if not name or name not in pack.by_name():
+    by = pack.by_name()
+    if not name or name not in by:
         return candidate
     base = box_distance(candidate, pack)
-    successors = [c for c in (dissolve(pack, name), scale_break(pack, name)) if c]
+    # successors are pushes of THIS candidate's own assumptions (every one, not only the first) ...
+    successors = [c for n in candidate.assumptions if n in by
+                  for c in (dissolve(pack, n), scale_break(pack, n)) if c]
     fp = _foreign_pack(pack)
     if fp is not None:
         t = transport_break(fp, pack)
-        if t:
+        # ... and the foreign transport only when it lands on an axis this candidate already breaks. The
+        # transport ignores the candidate, so admitting it unconditionally replaced most single-break ideas
+        # with the SAME unrelated transport (12/18 coding candidates collapsed onto one) — the opposite of
+        # pushing each idea outward.
+        if t and set(t.breaks) & set(candidate.breaks):
             successors.append(t)
     farther = [c for c in successors if box_distance(c, pack) > base]
     return max(farther, key=lambda c: box_distance(c, pack)) if farther else candidate
@@ -75,6 +82,7 @@ def push_further(candidate: Candidate, pack) -> Candidate:
 def novelty_search(pack, prompt: str = "", beam: int = 5, rounds: int = 2) -> List[Dict]:
     """ToT, inverted: a beam search that keeps the candidates FARTHEST from the box and prunes the ones
     that collapse into it. Each round pushes the survivors further. Returns [{distance, candidate}]."""
+    beam = max(0, beam)                              # a negative beam must not slice off the tail ([:−1])
     pool: List[Candidate] = list(generate_candidates(pack, prompt))
     for a in breakable(pack):                        # add the deletion frontier
         d = dissolve(pack, a.name)
@@ -208,7 +216,8 @@ def _diversify(frontier: List[Dict]) -> List[Dict]:
     seen: Counter = Counter()
     _q = lambda f: f["score"].get("taste_blended", f["score"]["composite"])   # taste flows through if present
     while remaining:
-        nxt = min(remaining, key=lambda f: (sum(seen[a] for a in f["candidate"].assumptions), -_q(f)))
+        nxt = min(remaining, key=lambda f: (sum(seen[a] for a in f["candidate"].assumptions),
+                                            -int(f.get("survived", True)), -_q(f)))
         remaining.remove(nxt)
         chosen.append(nxt)
         for a in nxt["candidate"].assumptions:
@@ -252,7 +261,9 @@ def _evaluate(cands, pack, repo, ledger, verify_fn, repo_signals, timeout, round
         new_output = c.operator in ("unify", "instrument", "reframe")
         rebranding_risk = not check.grounded and not c.needs and not new_output
         score = score_idea(c, pack=pack, repo=repo, grounded=check.grounded)
-        score["composite"] = round(score["composite"] * ledger.weight_of(bet.axis, bet.operator), 3)
+        # the ledger weight is an exploration multiplier (up to 2.0 for an untried operator on a tried axis), so
+        # clamp: the composite is declared in [0,1] and reached 1.08 after a settled reflexion round.
+        score["composite"] = round(min(1.0, score["composite"] * ledger.weight_of(bet.axis, bet.operator)), 3)
         bet.stake = round(min(0.95, 0.4 + 0.5 * score["composite"]), 2)
         maturity = _assess(breaks=c.breaks, has_executable_world_test=check.grounded,
                            coherence=score["composite"], new_output=new_output,
@@ -264,6 +275,7 @@ def _evaluate(cands, pack, repo, ledger, verify_fn, repo_signals, timeout, round
             rg = verify_fn(check, cwd=repo.root, timeout=timeout)
             ledger.settle(bet, won=(rg.status == "GREEN"))   # WON only if the SPECIFIC new test exists and is green
             item["verdict"] = rg
+            item["survived"] = rg.status == "GREEN"           # the × survives_falsification factor of the objective
         items.append(item)
     return items
 
@@ -307,7 +319,16 @@ def invent(prompt: str, pack=None, beam: int = 5, rounds: int = 2, repo_path: Op
         from .generators import anomaly_to_assumption
         axis = anomaly_axis if anomaly_axis in pack.axes else (
             max(pack.axes, key=lambda k: pack.axes[k].get("priority", 1)) if pack.axes else "")
-        mined0 = [(anomaly_to_assumption(pack, a, axis=axis)[0], axis) for a in anomalies if a and a.strip()]
+        mined0, taken = [], set(pack.by_name())
+        for a in anomalies:
+            if not (a and a.strip()):
+                continue
+            asm = anomaly_to_assumption(pack, a, axis=axis)[0]
+            base, k = asm.name, 2
+            while asm.name in taken:          # the slug keeps only 4 words: distinct anomalies must not collide
+                asm.name, k = f"{base}_{k}", k + 1
+            taken.add(asm.name)
+            mined0.append((asm, axis))
         if mined0:
             pack = _extend_pack(pack, mined0)
     # persistence: a ledger_path auto-loads prior bets/policy and is saved at the end.
@@ -395,7 +416,11 @@ def invent(prompt: str, pack=None, beam: int = 5, rounds: int = 2, repo_path: Op
         key = (c.name, c.operator, tuple(c.breaks), tuple(c.assumptions), c.negation)
         if key not in seen:
             seen.add(key); deduped.append(f)
-    frontier = sorted(deduped, key=lambda f: (-f["score"]["composite"], f["rebranding_risk"]))
+    # objective = box-distance (inside composite) × survives_falsification: once checks were EXECUTED, an idea
+    # whose bet LOST can no longer outrank one that survived (before, the verdict never touched the ranking).
+    # Unexecuted items carry no verdict and keep the composite order (survived defaults to True).
+    frontier = sorted(deduped, key=lambda f: (-int(f.get("survived", True)), -f["score"]["composite"],
+                                              f["rebranding_risk"]))
     # T2.1 EARNED TASTE (opt-in): re-rank by a value LEARNED from settled outcomes (which past bets survived
     # falsification), not just box-distance — the calibrated 'nose' the engine otherwise lacks. `taste=True`
     # learns from THIS ledger's settled bets; an EarnedTaste (e.g. loaded from a prior session) carries the

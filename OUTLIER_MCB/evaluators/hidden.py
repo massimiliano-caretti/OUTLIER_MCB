@@ -45,14 +45,17 @@ class HiddenEvaluator(BaseEvaluator):
         hidden_basis = hid if hid is not None else (pub if pub is not None else 0.0)
         adv_basis = adv if adv is not None else 1.0
         leakage = (neg is not None and neg > self.leakage_threshold)
-        hidden_ok = (hid is None) or (hid >= self.hidden_threshold)
+        # with no hidden cases the PUBLIC cases are the only evidence — they must then meet the bar themselves
+        # (previously a candidate failing EVERY public case was `passed=True` when no hidden cases existed).
+        hidden_ok = (hid >= self.hidden_threshold) if hid is not None else (pub is None or pub >= self.hidden_threshold)
         adv_ok = (adv is None) or (adv >= self.adversarial_threshold)
         passed = bool(hidden_ok and adv_ok and not leakage)
 
         score = round(hidden_basis * (1.0 - (neg or 0.0)) * (0.5 + 0.5 * adv_basis), 4)
         notes = []
         if not hidden_ok:
-            notes.append("passes public but FAILS hidden — optimized the visible, not a discovery")
+            notes.append("passes public but FAILS hidden — optimized the visible, not a discovery" if hid is not None
+                         else "fails the public cases (no hidden cases to rescue it)")
         if leakage:
             notes.append("passes a NEGATIVE CONTROL — leakage, not a mechanism")
         if not adv_ok:

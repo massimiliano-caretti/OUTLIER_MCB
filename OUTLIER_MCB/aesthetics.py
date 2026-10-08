@@ -40,12 +40,44 @@ def _operators(tree: ast.AST) -> List[str]:
     return sorted(type(n.op).__name__ for n in ast.walk(tree) if isinstance(n, (ast.BinOp, ast.UnaryOp)))
 
 
-_SAFE = {"__builtins__": {}}
+_BINOPS = {ast.Add: lambda a, b: a + b, ast.Sub: lambda a, b: a - b, ast.Mult: lambda a, b: a * b,
+           ast.Div: lambda a, b: a / b, ast.FloorDiv: lambda a, b: a // b, ast.Mod: lambda a, b: a % b}
+_UNOPS = {ast.UAdd: lambda a: +a, ast.USub: lambda a: -a}
+_MAX_EXPONENT = 64          # |b| in a**b — enough for any formula, small enough that 9**9**9 cannot hang the engine
+_MAX_MAGNITUDE = 1e300
+
+
+def _arith(node: ast.AST, env: Dict[str, float]) -> float:
+    """A tiny, closed arithmetic interpreter over the AST: numbers, variables, + − × ÷ // % ** and unary ±.
+    Anything else (attribute access, calls, subscripts, comprehensions…) is REFUSED — unlike eval() with empty
+    builtins, which still allows `().__class__.__mro__[1].__subclasses__()` escapes and unbounded `9**9**9`."""
+    if isinstance(node, ast.Expression):
+        return _arith(node.body, env)
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)) and not isinstance(node.value, bool):
+        return node.value
+    if isinstance(node, ast.Name):
+        return env[node.id]
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _UNOPS:
+        return _UNOPS[type(node.op)](_arith(node.operand, env))
+    if isinstance(node, ast.BinOp):
+        left, right = _arith(node.left, env), _arith(node.right, env)
+        if isinstance(node.op, ast.Pow):
+            if abs(right) > _MAX_EXPONENT:            # operands are already ≤ _MAX_MAGNITUDE, so this bounds work
+                raise OverflowError("exponent out of the bounded range")
+            out = left ** right
+        elif type(node.op) in _BINOPS:
+            out = _BINOPS[type(node.op)](left, right)
+        else:
+            raise ValueError(f"operator {type(node.op).__name__} not allowed")
+        if isinstance(out, complex) or abs(out) > _MAX_MAGNITUDE:
+            raise OverflowError("value out of range")
+        return out
+    raise ValueError(f"{type(node).__name__} is not allowed in an aesthetic expression")
 
 
 def _eval(expr: str, env: Dict[str, float]) -> Optional[float]:
     try:
-        return eval(compile(_parse(expr), "<expr>", "eval"), _SAFE, env)   # arithmetic only, no builtins
+        return _arith(_parse(expr), env)                  # arithmetic only, by construction (no eval)
     except Exception:
         return None
 

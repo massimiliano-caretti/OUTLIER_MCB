@@ -90,7 +90,9 @@ class Ledger:
         return {f"{axis}×{op}": round(1.0 / self.price(axis, op), 3) for axis, op in keys}
 
     def weight_of(self, axis: str, operator: str) -> float:
-        """The policy weight a generator can multiply a candidate's score by (1.0 for an untried move)."""
+        """The policy weight a generator can multiply a candidate's score by: 1/price. NOTE it is NOT 1.0 for an
+        untried move — the exploration discount makes it 1.333 (≈2.0 on an axis already tried under another
+        operator), so a caller multiplying a [0,1] score by it must clamp the product."""
         return round(1.0 / self.price(axis, operator), 3)
 
     def save(self, path: str) -> None:
@@ -109,7 +111,8 @@ class Ledger:
         led = cls()
         if not os.path.exists(path):
             return led
-        data = json.load(open(path))
+        with open(path) as fh:                         # close the handle (was json.load(open(path)))
+            data = json.load(fh)
         led.bets = [Bet(**b) for b in data.get("bets", [])]
         led._losses = {tuple(k.split("|", 1)): n for k, n in data.get("losses", {}).items()}
         led._wins = {tuple(k.split("|", 1)): n for k, n in data.get("wins", {}).items()}

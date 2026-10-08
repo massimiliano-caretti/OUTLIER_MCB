@@ -74,6 +74,9 @@ def preflight_creative_request(prompt: str,
         # falsifiable conceptual space to work with instead of only the generic one. Provisional, never authoritative.
         try:
             from .pack_induction import infer_domain_pack, validate_inferred_pack
+            # NB: a probed RepoContext (not a dict) is deliberately NOT handed over: infer_domain_pack ranks targets
+            # by frequency, so repo identifiers would out-vote the problem's own nouns (measured: "bake bread" in
+            # this repo induced 'pack_*' assumptions). Only an explicit repo-world dict is passed through.
             induced = infer_domain_pack(problem, repo=repo if isinstance(repo, dict) else None)
             if not validate_inferred_pack(induced):          # only attach a pack that is actually usable
                 result["inferred_pack"] = induced
@@ -107,7 +110,9 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
     if pf.get("elicitation_required") and provider is not None:
         from .research import auto_elicit, ResearchError
         try:
-            built, meta = auto_elicit(prompt, provider)
+            # register=False: the sourced pack is passed EXPLICITLY below; registering it globally made every
+            # later request route into this one provisional pack (a session-wide side effect of one brief).
+            built, meta = auto_elicit(prompt, provider, register=False)
             header = ("[OUTLIER_MCB sourced an unknown domain from the web — " + meta["warning"] + "\n"
                       " sources: " + "; ".join(s.get("url", s.get("title", "")) for s in meta["sources"][:5])
                       + f"  · pack_quality={meta['quality']}]\n")
@@ -119,7 +124,10 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
         from .elicit import elicit_pack
         e = elicit_pack(prompt)
         if e.get("request"):
-            out.append("\n[no known domain] Two honest paths — do NOT fake a domain answer:")
+            out.append("\n[no known domain] Three honest paths — do NOT fake a domain answer:")
+            out.append("  (0) ANTI-MODE (fastest, request-specific): write YOUR 3-5 most-likely default answers, then")
+            out.append("      print(gsl.mode_brief(prompt, [answer_1, ...])) — what they share is THIS request's box;")
+            out.append("      every final idea must be TAIL: gsl.judge(idea, prompt=prompt, mode=[answer_1, ...]).")
             out.append("  (a) ELICIT examples and build a pack:")
             for i, q in enumerate(e["request"]["questions"], 1):
                 out.append(f"      {i}. {q}")

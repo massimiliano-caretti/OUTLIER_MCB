@@ -308,9 +308,26 @@ def evolutionary_self_repair(proposal: RepairProposal, measure: Optional[Callabl
     base_inv = verify_invariants(invariants)
     before = measure()
 
-    proposal.apply()
-    after_inv = verify_invariants(invariants)
-    after = measure()
+    # TRANSACTION: a proposal (LLM-supplied) that RAISES mid-apply, or a metric that crashes on the changed library,
+    # must not leave a half-applied change behind — roll back and record the attempt as a rejected repair.
+    try:
+        proposal.apply()
+        after_inv = verify_invariants(invariants)
+        after = measure()
+    except Exception as exc:
+        rb_err = ""
+        try:
+            proposal.rollback()
+        except Exception as rexc:                      # surface, never mask, a failing rollback
+            rb_err = f"; WARNING rollback raised: {rexc}"
+        reason = f"the repair raised {type(exc).__name__}: {exc}"
+        if memory is not None:
+            log = DiagnosticLog(task=f"self_repair:{proposal.name}")
+            log.failed("self_repair", "the repair raised during apply/measure", detail=reason)
+            log.mark_completed(False)
+            memory.record(log)
+        return RepairResult(proposal=proposal.name, accepted=False, reason=reason + "; rolled back" + rb_err,
+                            before=before, after=before, rolled_back=True)
 
     newly_broken = sorted(base_inv.passed_names & after_inv.failed_names)
     regressed = (after < before) if direction == "increase" else (after > before)

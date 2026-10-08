@@ -9,7 +9,8 @@ from typing import Dict
 
 
 def _c(x) -> float:
-    return max(0.0, min(1.0, float(x or 0)))
+    v = float(x or 0)
+    return max(0.0, min(1.0, v)) if v == v else 0.0     # BUGFIX: NaN used to clamp to 1.0 (min(1.0, nan) == 1.0)
 
 
 def interestingness_score(surprise: float = 0.0, opens_new_question: float = 0.0,

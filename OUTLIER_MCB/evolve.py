@@ -8,6 +8,7 @@ rather than reimplementing a coding optimizer. A candidate that is not evaluated
 without a confirmed online search cannot score high; an improvement must beat baseline OR parent on the metric.
 """
 from __future__ import annotations
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
@@ -280,8 +281,11 @@ def evolve_invention(problem: str, evaluator, budget: int = 24, memory: Optional
                                        negation="the additive/box baseline (breaks nothing)")
     baseline_score = round(evaluator.evaluate(baseline_candidate).score, 4)
 
+    tried = set()                                        # candidate names already evaluated in THIS run
+
     def _ingest(candidate, generation, parents, parent_score, operator):
         counter[0] += 1
+        tried.add(getattr(candidate, "name", ""))
         result = evaluator.evaluate(candidate)
         nart = _novelty_art(candidate, prior_art_provider)
         comps = _components_for(candidate, result, baseline_score, parent_score, nart, memory, problem)
@@ -351,7 +355,8 @@ def evolve_invention(problem: str, evaluator, budget: int = 24, memory: Optional
         seeds = proposed + seeds
         trace.log("llm_proposer", why="an external LLM proposes content; the objective evaluator (not the LLM) decides",
                   output=f"{len(proposed)} LLM candidates")
-    width = budget if mode == "breadth" else max(3, budget // 3)
+    # never exceed the budget: depth mode used max(3, budget//3), which evaluated 3 seeds even at budget 0-2
+    width = max(0, min(budget, budget if mode == "breadth" else max(3, budget // 3)))
     gen0 = [_ingest(c, 0, [], None, c.operator) for c in seeds[:width] if _accept(c)]
     spent = len(gen0)
     trace.log("generation_0", why=f"{mode}: evaluate the seed pool by the objective", output=f"{spent} candidates")
@@ -368,7 +373,15 @@ def evolve_invention(problem: str, evaluator, budget: int = 24, memory: Optional
         if orchestrate and spent < budget:
             fox = detect_problem_fixation(memory.by_problem(problem))
             if fox["fixated"]:
-                escape = _provocation(pack) or _random_entry(pack)
+                # escape onto the LEAST-attacked breakable assumption that is NOT the dominant seed — the bare
+                # provocation(pack) always hit the pack's first box assumption, i.e. often the very seed the
+                # population was fixated on, re-ingesting the same PO candidate every round.
+                attacked = Counter(a for r in memory.by_problem(problem) for a in r.broken_assumptions)
+                others = [a.name for a in breakable(pack) if a.name != fox["dominant_seed"]]
+                target = min(others, key=lambda n: (attacked[n], others.index(n))) if others else ""
+                escape = (_provocation(pack, target) if target else None) or _random_entry(pack)
+                if escape is not None and escape.name in tried:
+                    escape = None
                 if escape is not None and _accept(escape):
                     erec, ecand = _ingest(escape, gen, [], None, "fixation_escape")
                     by_id[erec.id] = ecand
@@ -384,10 +397,13 @@ def evolve_invention(problem: str, evaluator, budget: int = 24, memory: Optional
             if not names:
                 continue
             nm = names[(gen + i) % len(names)]
+            # the distant blend is anchored on the parent's lever (when it is a pack assumption); unanchored it
+            # was the SAME top-priority blend for every parent, re-evaluated round after round.
+            anchor = nm if nm in pack.by_name() else ""
             ops = [("invert", lambda: invert_assumption(pack, nm)),
                    ("scale", lambda: scale_break(pack, nm, factor=1000)),
                    ("dissolve", lambda: dissolve(pack, nm)),
-                   ("recombine_distant", lambda: conceptual_blend(pack, foreign) if foreign else None)]
+                   ("recombine_distant", lambda: conceptual_blend(pack, foreign, name_a=anchor) if foreign else None)]
             # READ BACK a failure lesson: if this parent failed, add the repair mutation its mode prescribes
             if orchestrate and pcand is not None and not prec.externally_settled:
                 lesson = summarize_failure_mode(prec)
@@ -395,8 +411,15 @@ def evolve_invention(problem: str, evaluator, budget: int = 24, memory: Optional
                     mr = mutate_from_failure_lesson(pcand, lesson, pack, prec.id)
                     if mr is not None and mr.candidate is not None:
                         ops = ops + [("lesson_repair", lambda r=mr.candidate: r)]
-            op_name, op = ops[(gen + i) % len(ops)]
-            child = op()
+            # the scheduled op first; if it is sterile or would re-evaluate a candidate already spent in THIS run
+            # (a deterministic evaluator returns the same verdict — zero information), try the next op.
+            child = op_name = None
+            for j in range(len(ops)):
+                cand_name, cand_op = ops[(gen + i + j) % len(ops)]
+                cand = cand_op()
+                if cand is not None and cand.name not in tried:
+                    op_name, child = cand_name, cand
+                    break
             if child is None or not _accept(child):
                 continue
             rec, ccand = _ingest(child, gen, [prec], prec.score, op_name)

@@ -19,13 +19,16 @@ class ClaimOverreach(AssertionError):
 
 
 def assert_outside_the_box(idea: str, pack=None, prompt: Optional[str] = None) -> None:
-    """Fail (NoveltyRegression) if `idea` reduces to the box. Use in tests/CI to guarantee a design keeps
-    breaking a real assumption and never silently regresses into a rename of a known method."""
+    """Fail (NoveltyRegression) if `idea` reduces to the box — or takes a route a no-go theorem has already
+    killed (DEAD_BY_BARRIER, e.g. perpetual motion). Use in tests/CI to guarantee a design keeps breaking a real
+    assumption and never silently regresses into a rename of a known method or a proven-dead route."""
     j = judge(idea, prompt=prompt, pack=pack) if pack is not None else judge(idea, prompt=prompt)
     if j.verdict == "INSIDE_THE_BOX":
         inside = (j.closure or {}).get("inside_closure") if isinstance(getattr(j, "closure", None), dict) else None
         detail = f" (inside «{inside}»)" if inside else ""
         raise NoveltyRegression(f"INSIDE_THE_BOX{detail}: {j.next_step or 'breaks no axis'} — idea: {idea!r}")
+    if j.verdict == "DEAD_BY_BARRIER":                   # a no-go theorem kills the route: worse than in-the-box,
+        raise NoveltyRegression(f"DEAD_BY_BARRIER: {j.next_step} — idea: {idea!r}")   # never a passing design
 
 
 def assert_claim_honest(text: str, evidence: Optional[Dict] = None) -> None:

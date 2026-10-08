@@ -85,8 +85,12 @@ def invent_new_language(baseline: FormalLanguage, problems: Sequence[Sequence[Tu
     lang = FormalLanguage(name=name, primitives=dict(baseline.primitives), macros=dict(baseline.macros))
     if candidates:
         seg, _c = max(candidates, key=lambda sc: sc[1] * (len(sc[0]) - 1))
-        macro_name = f"m{len(lang.macros)}"
-        lang.macros[macro_name] = tuple(seg)
+        # a FRESH name: `m{len(macros)}` could collide with an existing macro (baseline macros {'m1': …} → the new
+        # word overwrote m1 with a body that referenced m1 itself → infinite recursion in run()).
+        i = len(lang.macros)
+        while f"m{i}" in lang.macros or f"m{i}" in lang.primitives:
+            i += 1
+        lang.macros[f"m{i}"] = tuple(seg)
     return lang
 
 

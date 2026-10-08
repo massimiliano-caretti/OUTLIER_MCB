@@ -35,7 +35,7 @@ def self_spark(pack, prompt: str = "", n: int = 3) -> List[Dict]:
     """Let the engine propose which assumptions to break, ranked by novelty potential (axis priority ·
     needs-new-data · not-yet-exhausted), then route them through the SAME falsifier."""
     req = data_req(pack)
-    dead_axes = {pack.dimension_of.get(k) for k, v in pack.failure_memory.items()
+    dead_axes = {pack.dimension_of.get(k) for k, v in (pack.failure_memory or {}).items()   # None-safe, like _dead_axes
                  if str(v.get("status", "")).startswith("DEAD")}
 
     def potential(a) -> Tuple[int, str]:

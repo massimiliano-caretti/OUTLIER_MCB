@@ -24,7 +24,7 @@ class ScoreWeights:
     def composite(self, f: Dict[str, float]) -> float:
         value = (self.usefulness * f["usefulness"] + self.depth * f["depth"]
                  + self.novelty * f["novelty"] + self.simplicity * (1.0 - f["risk"]))
-        return round(max(0.0, value - self.cost * f["cost"]), 3)
+        return round(min(1.0, max(0.0, value - self.cost * f["cost"])), 3)   # [0,1] even with custom weights
 
 
 def default_score_weights() -> ScoreWeights:

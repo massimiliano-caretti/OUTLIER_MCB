@@ -27,18 +27,24 @@ def _closures_for(pf: Dict) -> List[Dict]:
     return out
 
 
+def _q(text) -> str:
+    """Make free text safe inside a mermaid label: a raw '"' closes the label and '|' closes an edge label, which
+    produced an unparseable diagram (BUGFIX). Mermaid's entity form keeps the character visible."""
+    return (str(text).replace('"', "#quot;").replace("|", "#124;").replace("\n", " ").replace("\r", " "))
+
+
 def _mermaid(box_name: str, axes: List[Dict], closures: List[Dict]) -> str:
-    lines = ["graph TD", f'  BOX["THE BOX: {box_name[:60]}"]']
+    lines = ["graph TD", f'  BOX["THE BOX: {_q(box_name[:60])}"]']
     for i, ax in enumerate(axes):
         aid = f"A{i}"
-        lines.append(f'  {aid}["break {ax.get("assumption","?")}\\n(axis: {ax.get("dimension","?")})"]')
-        lines.append(f"  BOX -->|escape via {ax.get('dimension','?')}| {aid}")
+        lines.append(f'  {aid}["break {_q(ax.get("assumption","?"))}\\n(axis: {_q(ax.get("dimension","?"))})"]')
+        lines.append(f"  BOX -->|escape via {_q(ax.get('dimension','?'))}| {aid}")
     for j, c in enumerate(closures):
         cid = f"C{j}"
-        lines.append(f'  {cid}(["closure: {c["name"]}"])')
+        lines.append(f'  {cid}(["closure: {_q(c["name"])}"])')
         lines.append(f"  BOX -.inside.-> {cid}")
         if c["exits"]:
-            lines.append(f'  {cid} ==>|only exit| E{j}["{c["exits"][0][:48]}"]')
+            lines.append(f'  {cid} ==>|only exit| E{j}["{_q(c["exits"][0][:48])}"]')
     return "\n".join(lines)
 
 

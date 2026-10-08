@@ -10,12 +10,15 @@ Rules (deliberately stricter than ordinary application code — see §1 of the b
   • Shell metacharacters (`; | & > < ` $() && || newline …`) are REFUSED with `UnsafeCommandError`
     unless the caller explicitly opts into `allow_shell_operators=True` (the test/materialisation paths
     never do). This blocks pipes, redirection, chaining and substitution before anything runs.
-  • Every run is bounded by a timeout; a timeout is reported as a result, never an unbounded hang.
+  • Every run is bounded by a timeout; a timeout is reported as a result, never an unbounded hang. On timeout
+    the WHOLE process group is killed (no orphaned grandchildren), and stdin is /dev/null unless input is given.
 
 Pure stdlib. No new runtime dependency. Used by `llm.SubprocessLLMProvider` and `llm_loop` materialisation.
 """
 from __future__ import annotations
+import os
 import shlex
+import signal
 import subprocess
 from dataclasses import dataclass
 from typing import List, Optional, Sequence, Union
@@ -29,6 +32,22 @@ _SHELL_OPERATORS = (";", "|", "&", ">", "<", "`", "$(", "${", "&&", "||", "\n", 
 # that enable injection, chaining, redirection and substitution. Kept narrow to avoid false positives on
 # legitimate argv (e.g. a regex passed as one already-split token is fine; it is the *string* form we guard).
 _INJECTION_OPERATORS = (";", "|", "&", ">", "<", "`", "$(", "${", "&&", "||", "\n", "\r", ">>", "2>", "<<")
+
+
+# Env-var names that look like credentials. Code the LLM WROTE (a materialized test) must not inherit them: a
+# test file can read os.environ and exfiltrate an API key through any side channel it has.
+_SECRET_MARKERS = ("KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "AUTH", "COOKIE", "SESSION",
+                   "PRIVATE", "CERT")
+
+
+def scrubbed_env(extra: Optional[dict] = None, base: Optional[dict] = None) -> dict:
+    """A copy of the environment WITHOUT credential-like variables (names containing KEY/TOKEN/SECRET/…), for
+    running untrusted, LLM-written code. PATH/HOME/locale/virtualenv variables are kept so the tests still run;
+    `extra` is applied last (the caller's explicit settings win)."""
+    src = os.environ if base is None else base
+    env = {k: v for k, v in src.items() if not any(m in k.upper() for m in _SECRET_MARKERS)}
+    env.update(extra or {})
+    return env
 
 
 class UnsafeCommandError(ValueError):
@@ -93,19 +112,58 @@ class CommandRunner:
             argv = to_argv(command, allow_shell_operators=self.allow_shell_operators)
         except UnsafeCommandError as e:
             return CommandResult(argv=[], returncode=126, error=str(e))
+        except ValueError as e:                        # shlex: unbalanced quotes in UNTRUSTED text → a result
+            return CommandResult(argv=[], returncode=126, error=f"unparseable command: {e}")
         if not argv:
             return CommandResult(argv=[], returncode=127, error="empty command")
         try:
-            p = subprocess.run(argv, cwd=cwd, capture_output=True, text=True,
-                               timeout=timeout, input=input, shell=False, env=env)
-            return CommandResult(argv=argv, returncode=p.returncode, stdout=p.stdout or "", stderr=p.stderr or "")
-        except subprocess.TimeoutExpired as e:
-            out = (e.stdout or "") if isinstance(e.stdout, str) else ""
-            err = (e.stderr or "") if isinstance(e.stderr, str) else ""
-            return CommandResult(argv=argv, returncode=124, stdout=out, stderr=err, timed_out=True,
-                                 error=f"timeout after {timeout}s")
-        except (OSError, subprocess.SubprocessError) as e:
+            stdout, stderr, rc, timed_out = _run_bounded(argv, cwd=cwd, timeout=timeout, input=input, env=env)
+        except (OSError, subprocess.SubprocessError, ValueError) as e:
             return CommandResult(argv=argv, returncode=127, error=str(e))
+        if timed_out:
+            return CommandResult(argv=argv, returncode=124, stdout=stdout, stderr=stderr, timed_out=True,
+                                 error=f"timeout after {timeout}s")
+        return CommandResult(argv=argv, returncode=rc, stdout=stdout, stderr=stderr)
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """Kill the process AND everything it spawned. The child runs in its own session (process group), so a
+    test that forks a server / a CLI that spawns workers cannot outlive the timeout as an orphan."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            proc.kill()
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_bounded(argv: List[str], *, cwd: Optional[str], timeout: Optional[float], input: Optional[str],
+                 env: Optional[dict]):
+    """Run argv (no shell) with a hard timeout that kills the whole process group. stdin is the given `input`
+    or /dev/null — never the caller's terminal, so a command waiting on input() cannot hang the loop.
+    Returns (stdout, stderr, returncode, timed_out)."""
+    kw = {"start_new_session": True} if os.name == "posix" else {}
+    proc = subprocess.Popen(argv, cwd=cwd, env=env, shell=False, text=True,
+                            stdin=subprocess.PIPE if input is not None else subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+    try:
+        out, err = proc.communicate(input=input, timeout=timeout)
+        return out or "", err or "", proc.returncode, False
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:            # a pipe held open by something we could not kill
+            out, err = "", ""
+        return out or "", err or "", proc.returncode if proc.returncode is not None else -9, True
+    except BaseException:                             # Ctrl-C / any error: never leave the tree running
+        _kill_tree(proc)
+        proc.wait()
+        raise
 
 
 # A module-level default for callers that don't need their own configured instance.

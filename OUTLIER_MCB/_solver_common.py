@@ -234,6 +234,17 @@ def ast_to_tptp(claim_expr: str, lhs: str, rhs: str, hypotheses, variables: Dict
 _GP_CMP = {ast.Gt: ">", ast.GtE: ">=", ast.Lt: "<", ast.LtE: "<=", ast.Eq: "==", ast.NotEq: "!="}
 
 
+# GP built-ins that reach the shell, the filesystem, or load/evaluate code — never passed through (security: the
+# claim text may come from an untrusted source and GP strings can be built from integers via Strchr).
+_GP_FORBIDDEN = frozenset({
+    "system", "extern", "externstr", "install", "read", "readvec", "readstr", "write", "write1", "writebin",
+    "writetex", "eval", "Strchr", "Str", "Strexpand", "Strtex", "Strprintf", "printf", "getenv", "alarm",
+    "input", "quit", "exit", "kill", "addhelp", "default", "dbg_x", "breakpoint", "gpextern", "fileopen",
+    "fileextern", "filewrite", "filewrite1", "fileread", "filereadstr", "fileclose", "fileflush", "export",
+    "exportall", "unexport", "unexportall", "parapply", "parfor", "parforprime", "parsum", "parvector", "self",
+})
+
+
 class _GpCompiler(ast.NodeVisitor):
     """Unlike the SMT/TPTP compilers, this PASSES arbitrary function calls THROUGH (isprime, nextprime, moebius,
     sigma, …) — that is the whole point of a number-theory CAS backend. Variables are used verbatim."""
@@ -273,6 +284,8 @@ class _GpCompiler(ast.NodeVisitor):
                 return f"abs({self.visit(node.args[0])})"
             if not fn.isidentifier():
                 raise ValueError("only named function calls are allowed")
+            if fn in _GP_FORBIDDEN or fn.lower().startswith(("file", "write", "read", "extern", "system")):
+                raise ValueError(f"GP function {fn!r} is not allowed (I/O / shell / code loading)")
             return f"{fn}({args})"                              # isprime(...), nextprime(...), … pass through to GP
         if isinstance(node, ast.Name):
             return node.id

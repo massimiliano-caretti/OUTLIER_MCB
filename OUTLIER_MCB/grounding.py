@@ -57,12 +57,31 @@ class RepoContext:
         ])
 
 
+def _read(p: Path) -> str:
+    """Read a file for probing; an unreadable/vanished file (permissions, a broken symlink, a directory with a
+    marker's name) reads as empty instead of crashing the whole probe (BUGFIX: probe raised PermissionError)."""
+    try:
+        return p.read_text(errors="ignore")
+    except (OSError, ValueError):
+        return ""
+
+
+def _listdir(p: Path) -> List[str]:
+    try:
+        return os.listdir(p)
+    except OSError:
+        return []
+
+
 def _detect_commands(root: Path, names: set) -> dict:
     """Map the marker files present in the project root to real toolchain commands."""
-    text = lambda p: (root / p).read_text(errors="ignore") if (root / p).exists() else ""
+    text = lambda p: _read(root / p)
     cmds = {}
     pyproject = text("pyproject.toml")
-    if "test_" in "".join(names) or {"pytest.ini", "tox.ini", "conftest.py"} & names or "[tool.pytest" in pyproject:
+    # a root entry that LOOKS like a test (test_*.py / *_test.py), not any name containing 'test_' as a substring
+    # ('latest_notes.md' used to switch on pytest for a non-Python repo)
+    looks_like_test = any(n.startswith("test_") or n.endswith("_test.py") for n in names)
+    if looks_like_test or {"pytest.ini", "tox.ini", "conftest.py"} & names or "[tool.pytest" in pyproject:
         cmds["test"] = "pytest -q"
     if "mypy.ini" in names or "[tool.mypy]" in pyproject:
         cmds["type"] = "mypy ."
@@ -88,7 +107,7 @@ def _symbols(files: List[Path], limit: int = 12) -> List[str]:
     """Collect a few public def/class/function names from real source files (a cheap symbol sample)."""
     out: List[str] = []
     for f in files:
-        for line in f.read_text(errors="ignore").splitlines():
+        for line in _read(f).splitlines():
             s = line.strip()
             for kw in ("def ", "class ", "function ", "func "):
                 if s.startswith(kw):
@@ -117,7 +136,7 @@ def probe(path: str = ".", max_files: int = 4000) -> RepoContext:
         if Path(dirpath) == root:
             root_names = set(filenames) | set(dirnames)
             components = [d for d in sorted(dirnames)
-                          if any(f.endswith(tuple(_LANGS)) for f in os.listdir(Path(dirpath, d)))]
+                          if any(f.endswith(tuple(_LANGS)) for f in _listdir(Path(dirpath, d)))]
         for fn in filenames:
             seen += 1
             if seen > max_files:
@@ -131,7 +150,8 @@ def probe(path: str = ".", max_files: int = 4000) -> RepoContext:
                     tests.append(rel)
                 elif len(sources) < 8:
                     sources.append(p)
-                marks = sum(p.read_text(errors="ignore").count(m) for m in ("TODO", "FIXME", "HACK"))
+                body = _read(p)
+                marks = sum(body.count(m) for m in ("TODO", "FIXME", "HACK"))
                 if marks:
                     fragility[rel] = marks
         if seen > max_files:
@@ -158,8 +178,8 @@ def _public_api(root: Path, components: List[str]) -> List[str]:
         if not init.exists():
             continue
         try:
-            tree = ast.parse(init.read_text(errors="ignore"))
-        except SyntaxError:
+            tree = ast.parse(_read(init))
+        except (SyntaxError, ValueError):
             continue
         for node in tree.body:
             if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "__all__" for t in node.targets):

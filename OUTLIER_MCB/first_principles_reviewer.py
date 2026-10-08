@@ -14,6 +14,7 @@ KNOWN families would say; this is what FIRST PRINCIPLES say when the families ar
 """
 from __future__ import annotations
 from dataclasses import dataclass, field
+import re
 from typing import List, Optional
 
 
@@ -49,35 +50,42 @@ class FirstPrinciplesCritique:
 _LENSES = [
     ("universal_quantifier",
      ("all", "every", "each", "always", "never", "any ", "guarantee", "ensure", "ensures", "must ",
-      "everyone", "100%", "no exception", "forall"),
+      "everyone", "100%", "no exception", "forall",
+      "tutti", "tutte", "ogni", "sempre", "mai", "garantisce", "garantito", "qualsiasi", "nessuna eccezione"),
      "COUNTEREXAMPLE",
      "A universal claim is refuted by a SINGLE counterexample.",
      "Adversarially search the input class the claim quantifies over; ONE input that violates it refutes "
      "the claim. Report the worst case and the failure rate, not the average."),
     ("comparative_performance",
      ("faster", "cheaper", "better", " more ", " less ", "lower", "higher", "reduce", "improv",
-      "outperform", "efficient", "optimal", "speedup", "fewer", "scales better"),
+      "outperform", "efficient", "optimal", "speedup", "fewer", "scales better",
+      "più veloce", "più economico", "migliore", "meglio", "riduce", "ridurre", "efficiente", "ottimale",
+      "supera", "meno costoso"),
      "UNMODELED_COST",
      "A 'better on X' claim hides the axis it pays on — the pack may not even model that axis.",
      "Measure an UNSTATED cost axis (tail latency p99, memory, $, energy, accuracy under distribution "
      "shift). If the idea wins on the stated metric but regresses on an unmodeled one, 'better' is false."),
     ("scale_monotonic",
      ("scale", "scalable", "linear", "constant time", "throughput", "unbounded", "o(", "arbitrary size",
-      "any size", "grows", "indefinitely"),
+      "any size", "grows", "indefinitely",
+      "scalabile", "lineare", "tempo costante", "illimitato", "qualsiasi dimensione", "cresce"),
      "REGIME",
      "A property true at small scale can break past a threshold.",
      "Increase the regime (N×, less supervision, adversarial load) until the property breaks; if it holds "
      "small and fails large it is not the claimed property — show the crossover, not one operating point."),
     ("robustness_safety",
      ("robust", "stable", "safe", "correct", "deterministic", "reliable", "consistent", "secure",
-      "always works", "cannot fail", "provably"),
+      "always works", "cannot fail", "provably",
+      "robusto", "robusta", "stabile", "sicuro", "sicura", "corretto", "corretta", "deterministico",
+      "affidabile", "coerente", "non può fallire", "dimostrabilmente"),
      "PERTURBATION",
      "A robustness/safety claim must survive perturbation within its own spec.",
      "Perturb inputs within the stated spec (noise, reordering, boundary and degenerate values); if the "
      "output changes, the property is not robust. Negative control: a perturbation that SHOULD change the "
      "output must — otherwise the test is inert."),
     ("novelty",
-     ("novel", "new ", "first ", "unprecedented", "never seen", "breakthrough", "never-before"),
+     ("novel", "new ", "first ", "unprecedented", "never seen", "breakthrough", "never-before",
+      "nuovo", "nuova", "inedito", "inedita", "mai visto", "senza precedenti", "prima volta", "rivoluzionario"),
      "PRIOR_ART",
      "A novelty claim is refuted by one prior instance with the same MECHANISM.",
      "Search prior art over the full signature (mechanism, not name); a single close match downgrades the "
@@ -85,8 +93,33 @@ _LENSES = [
 ]
 
 
+# triggers that are deliberate STEMS (match any continuation: improve / improved / improvement)
+_STEMS = {"improv"}
+_SUFFIX = r"(?:s|es|d|ed|ing|ly)?"
+_TRIGGER_RE: dict = {}
+
+
+def _trigger_re(word: str):
+    """WHOLE-WORD matcher for a trigger (BUGFIX: plain substring matching fired 'all' inside 'small'/'call',
+    'each' inside 'reach'/'teacher', 'lower' inside 'flower', 'safe' inside 'unsafe' — raising objections the
+    claim never made). A trigger may take a light inflection (reduce→reduces, outperform→outperforms);
+    explicit stems in _STEMS keep prefix semantics; triggers ending in a non-word char (e.g. 'o(') keep it."""
+    rx = _TRIGGER_RE.get(word)
+    if rx is None:
+        w = word.strip()
+        left = r"(?<!\w)" if w[:1].isalnum() else ""
+        if w in _STEMS:
+            right = ""
+        elif w[-1:].isalnum():
+            right = (_SUFFIX if not word.endswith(" ") else "") + r"(?!\w)"
+        else:
+            right = ""
+        rx = _TRIGGER_RE[word] = re.compile(left + re.escape(w) + right)
+    return rx
+
+
 def _triggered(text: str, words) -> bool:
-    return any(w in text for w in words)
+    return any(_trigger_re(w).search(text) for w in words)
 
 
 def first_principles_attack(idea: str, claim: str = "", breaks: Optional[List[str]] = None) -> FirstPrinciplesCritique:

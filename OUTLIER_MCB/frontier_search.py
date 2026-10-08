@@ -134,7 +134,8 @@ def frontier_search(problem: str, candidates: List, objective_metric: str = "",
     for c in candidates:
         # 2-: discard a route a barrier proves dead (F2) — never even attempt it
         if pack is not None:
-            bv = barrier_membership(f"{c.name} {c.lemma.statement}", pack)
+            lemma = getattr(c, "lemma", None)      # a ResultCandidate has no lemma — screen its name alone
+            bv = barrier_membership(f"{c.name} {getattr(lemma, 'statement', '')}".strip(), pack)
             if bv is not None and bv.status == DEAD_BY_BARRIER:
                 report.dead_routes.append({"name": c.name, "barrier": bv.barrier})
                 report.next_levers.append(f"{c.name}: DEAD_BY_BARRIER «{bv.barrier}» → take an exit: {bv.exits[0]}")

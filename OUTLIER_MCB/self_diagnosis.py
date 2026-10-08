@@ -85,12 +85,15 @@ class DiagnosticMemory:
     Persistent, deterministic JSON, so post-mortems compound across runs and feed self-repair."""
     runs: List[Dict] = field(default_factory=list)
     _counter: int = 0
+    MAX_RUNS = 5000            # bound on persisted runs (oldest evicted first; the run-id counter keeps counting)
 
     def record(self, log: DiagnosticLog) -> str:
         if not log.run_id:
             log.run_id = f"run{self._counter}"
         self._counter += 1
         self.runs.append(log.to_dict())
+        if len(self.runs) > self.MAX_RUNS:
+            del self.runs[:len(self.runs) - self.MAX_RUNS]
         return log.run_id
 
     def all_points(self) -> List[DiagnosticPoint]:
@@ -103,8 +106,9 @@ class DiagnosticMemory:
                 or any(p["status"] in NON_OK for p in r.get("points", []))]
 
     def save(self, path: str) -> None:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"runs": self.runs, "counter": self._counter}, f, indent=2, sort_keys=True, ensure_ascii=False)
+        from .memory import atomic_write_json
+        atomic_write_json(path, {"runs": self.runs, "counter": self._counter},
+                          indent=2, sort_keys=True, ensure_ascii=False)
 
     @classmethod
     def load(cls, path: str) -> "DiagnosticMemory":

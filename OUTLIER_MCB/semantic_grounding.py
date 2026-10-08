@@ -64,13 +64,22 @@ def find_recurring_patterns(log: Sequence[Token], min_len: int = 2, max_len: int
                             min_support: int = 2) -> List[Tuple[Tuple[Token, ...], int]]:
     """Recurring, non-trivial contiguous patterns in `log`, most-compressing first (support × length). This is
     what the engine can meaningfully NAME — the raw material for an endogenous concept."""
+    # PERF FIX: one pass per length collecting each pattern's start positions, then a greedy non-overlapping
+    # count over those positions — identical to _count_nonoverlapping's left-to-right scan, but O(n·L) instead
+    # of re-scanning the whole log for every distinct pattern (O(n²·L²): seconds on a 1.5k-token log).
     seen: Dict[Tuple[Token, ...], int] = {}
     n = len(log)
-    for L in range(min_len, max_len + 1):
+    for L in range(max(1, min_len), max_len + 1):
+        positions: Dict[Tuple[Token, ...], List[int]] = {}
         for i in range(n - L + 1):
-            pat = tuple(log[i:i + L])
-            if pat not in seen:
-                seen[pat] = _count_nonoverlapping(log, pat)
+            positions.setdefault(tuple(log[i:i + L]), []).append(i)
+        for pat, starts in positions.items():
+            c, free_from = 0, 0
+            for i in starts:
+                if i >= free_from:
+                    c += 1
+                    free_from = i + L
+            seen[pat] = c
     good = [(p, c) for p, c in seen.items() if c >= min_support]
     return sorted(good, key=lambda pc: -(pc[1] * (len(pc[0]) - 1)))     # savings ≈ support × (len − 1)
 

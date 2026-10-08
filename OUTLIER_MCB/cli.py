@@ -12,7 +12,18 @@ from pathlib import Path
 
 
 def _read(p):
-    return Path(p).read_text() if p and Path(p).exists() else (p or "")
+    """`--problem` is a file path OR the problem text itself. A long inline prompt made Path.exists() raise
+    OSError (ENAMETOOLONG) and a directory made read_text() raise — both now fall back to the literal text.
+    Files are read as UTF-8 (Italian prompts must not depend on the locale's default encoding)."""
+    if not p:
+        return ""
+    try:
+        path = Path(p)
+        if path.is_file():
+            return path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        pass
+    return p
 
 
 def cmd_creative(a):
@@ -192,6 +203,20 @@ def cmd_route(a):
     print(json.dumps(route.as_dict(), indent=2) if getattr(a, "json", False) else route.markdown())
 
 
+def cmd_mode(a):
+    """Anti-mode: with no --answer, print step 1 (declare your default answers); with answers, the brief that breaks
+    what they share; with --idea, the verdict of that idea against the declared mode."""
+    from .mode_box import anti_mode_protocol, mode_brief, declare_mode, mode_distance
+    problem = _read(a.problem)
+    if not a.answer:
+        print(anti_mode_protocol(problem))
+    elif a.idea:
+        d = mode_distance(_read(a.idea), declare_mode(problem, a.answer))
+        print(json.dumps(d.as_dict(), indent=2, ensure_ascii=False) if a.json else f"{d.verdict}: {d.reason}")
+    else:
+        print(mode_brief(problem, a.answer, k=a.k))
+
+
 def cmd_explore(a):
     """The single front door: route → generate → settle externally → audit → one honest report."""
     from .studio import explore
@@ -247,6 +272,10 @@ def main(argv=None):
     p = sub.add_parser("route"); p.add_argument("--problem", required=True)
     p.add_argument("--json", action="store_true"); p.add_argument("--full-brief", dest="full_brief", action="store_true")
     p.set_defaults(f=cmd_route)
+    p = sub.add_parser("mode"); p.add_argument("--problem", required=True)
+    p.add_argument("--answer", action="append", default=[], help="one of YOUR default answers (repeat 3-5 times)")
+    p.add_argument("--idea"); p.add_argument("-k", type=int, default=3); p.add_argument("--json", action="store_true")
+    p.set_defaults(f=cmd_mode)
     p = sub.add_parser("explore"); p.add_argument("--problem", required=True); p.add_argument("--budget", type=int, default=16); p.set_defaults(f=cmd_explore)
     p = sub.add_parser("elicit"); p.add_argument("--problem", required=True); p.set_defaults(f=cmd_elicit)
     p = sub.add_parser("lint"); p.add_argument("paths", nargs="*"); p.add_argument("--text"); p.set_defaults(f=cmd_lint)

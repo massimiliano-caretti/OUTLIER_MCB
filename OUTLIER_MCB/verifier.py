@@ -13,8 +13,6 @@ the command compiled from the user's own project.
 Collaborators: repo_world.RepoCheck (what to run), economy.Ledger/Bet (what to settle).
 """
 from __future__ import annotations
-import shlex
-import subprocess
 from dataclasses import dataclass
 from typing import Optional
 
@@ -60,36 +58,38 @@ def run_check(check, cwd: str = ".", timeout: int = 120) -> Verdict:
                        what_was_verified="nothing — the check is not grounded (no runnable command).",
                        what_was_not="everything: novelty, correctness, usefulness.",
                        why="ungrounded: pass a real repo (grounding.probe) so a command exists to run.")
-    try:
-        proc = subprocess.run(shlex.split(check.command), cwd=cwd, capture_output=True,
-                              text=True, timeout=timeout)
-    except subprocess.TimeoutExpired:
+    from .runner import CommandRunner
+    # bounded, shell-free, process-group-killing execution (shared with the LLM loop). The command was compiled
+    # from the user's own repo; it is still tokenised with shlex and never handed to a shell.
+    res = CommandRunner(allow_shell_operators=True, default_timeout=timeout).run(check.command, cwd=cwd)
+    if res.timed_out:
         return Verdict(check.command, ran=True, passed=False, returncode=None, alive=False,
                        what_was_verified=f"the gate started but TIMED OUT after {timeout}s.",
                        what_was_not="whether it would eventually pass.",
                        why="timeout — treat as not-yet-passing; narrow the check or raise the timeout.")
-    except (FileNotFoundError, OSError) as exc:
+    if res.error:
         return Verdict(check.command, ran=False, passed=None, returncode=None, alive=False,
                        what_was_verified="nothing — the command could not be launched.",
-                       what_was_not="everything.", why=f"could not run `{check.command}`: {exc}")
-    passed = proc.returncode == 0
+                       what_was_not="everything.", why=f"could not run `{check.command}`: {res.error}")
+    passed = res.returncode == 0
     return Verdict(
-        command=check.command, ran=True, passed=passed, returncode=proc.returncode, alive=passed,
-        what_was_verified=f"the gate `{check.command}` {'PASSED' if passed else 'FAILED'} (exit {proc.returncode}).",
+        command=check.command, ran=True, passed=passed, returncode=res.returncode, alive=passed,
+        what_was_verified=f"the gate `{check.command}` {'PASSED' if passed else 'FAILED'} (exit {res.returncode}).",
         what_was_not="whether the idea is the BEST or genuinely useful — only that the repo's gate flips.",
         why=(check.pass_condition if passed else "the gate did not flip → the bet is settled LOST."),
-        output_tail=(proc.stdout + proc.stderr)[-600:],
+        output_tail=(res.stdout + res.stderr)[-600:],
     )
 
 
 def materialized(check, repo_root: str = ".") -> bool:
-    """Has the assistant actually written the named test? (Does test_name appear in the repo source?)"""
+    """Has the assistant actually written the named test? (Is `def <test_name>` DEFINED in the repo source?)
+    A bare mention in a comment/docstring, or a longer test that merely shares the prefix (`test_x_slow` for
+    `test_x`), does not count; vendored/VCS/venv trees are skipped."""
     from pathlib import Path
+    from .materialize import is_test_defined
     if not getattr(check, "test_name", ""):
         return False
-    root = Path(repo_root)
-    return any(check.test_name in f.read_text(errors="ignore")
-               for f in root.rglob("*.py") if "__pycache__" not in str(f))
+    return is_test_defined(check.test_name, Path(repo_root))
 # (validate_artifact_contract lives in artifacts.py — the canonical, single definition)
 
 
