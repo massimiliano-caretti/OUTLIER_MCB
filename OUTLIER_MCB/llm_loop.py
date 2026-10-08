@@ -15,7 +15,6 @@ repair of the single broken field), Novelty Search / prior-art gate (a graded ve
 rationale+world-test+patch-intent, never "absolute novelty"). Fully opt-in: no `llm`, no behaviour change.
 """
 from __future__ import annotations
-import os
 import sys
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
@@ -35,7 +34,9 @@ _SYSTEM_REPAIR = ("You are fixing ONE broken field of a previous proposal. Reply
 _SCHEMA_HINT = (
     'Each candidate is a JSON object: {"name","broken_assumption","operator","claim",'
     '"why_standard_families_fail","world_test_description","test_patch","implementation_patch",'
-    '"novelty_rationale","risk"}. test_patch/implementation_patch are UNIFIED DIFFS (--- /+++ /@@).')
+    '"novelty_rationale","risk","baseline_family","baseline_patch"}. test_patch/implementation_patch/baseline_patch '
+    'are UNIFIED DIFFS (--- /+++ /@@). baseline_patch = the BEST KNOWN FAMILY (baseline_family) implemented on the '
+    'same code: your test must STILL FAIL under it — that is the executable proof the idea is not that family.')
 
 
 # ── decomposed, configurable executable scoring (§8: readable components, hard to game) ──
@@ -46,7 +47,10 @@ DEFAULT_SCORE_WEIGHTS: Dict[str, float] = {
     "diversity": 0.10,          # opens a NEW behavioral cell rather than repeating one
     "patch_substance": 0.18,    # changes real source, not the test; no skip/xfail/assert-weakening
     "risk_penalty": 0.15,       # subtracted: self-declared risk
+    "baseline_separation": 0.12,  # bonus: the test stays RED under the best KNOWN family and GREEN under the idea
 }
+# a candidate whose test the known family ALSO passes is not separated from it: capped below the keep threshold.
+_NOT_SEPARATED_CAP = 0.25
 
 
 def _outcome_red_green(ev: Dict) -> float:
@@ -85,6 +89,9 @@ def score_components(ev: Dict) -> Dict[str, float]:
         "patch_substance": round(float(subst) if subst is not None
                                  else (0.1 if ev.get("only_cosmetic") else 0.8 if ev.get("has_patch") else 0.0), 3),
         "risk_penalty": round(float(ev.get("risk", 0.0) or 0.0), 3),
+        # 1 = the known family FAILS the test the idea passes · 0 = the known family passes it too · 0.5 = unchecked
+        "baseline_separation": (0.5 if ev.get("beats_baseline") is None else
+                                1.0 if (ev.get("beats_baseline") and ev.get("green_final")) else 0.0),
     }
 
 
@@ -101,6 +108,13 @@ def llm_evidence_score(ev: Dict, weights: Optional[Dict[str, float]] = None) -> 
     s = (w["red_green"] * c["red_green"] + w["test_quality"] * c["test_quality"]
          + w["prior_art"] * c["prior_art"] + w["diversity"] * c["diversity"]
          + w["patch_substance"] * c["patch_substance"] - w["risk_penalty"] * c["risk_penalty"])
+    # executable separation from the known family (only when a baseline_patch was actually run — an unchecked
+    # candidate scores exactly as before): a win adds the bonus; a test the known family ALSO passes proves the
+    # idea is not distinguishable from it, whatever the prose says → capped below the keep threshold.
+    if ev.get("beats_baseline") is False:
+        s = min(s, _NOT_SEPARATED_CAP)
+    elif ev.get("beats_baseline") and ev.get("green_final"):
+        s += w.get("baseline_separation", 0.0)
     return round(max(0.0, min(1.0, s)), 3)
 
 
@@ -422,7 +436,7 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
     Never escapes the repo (paths validated before any write)."""
     tel = telemetry if telemetry is not None else {}
     ev: Dict = {"materialized": False, "red_first": False, "green_final": False, "red_kind": "NOT_MATERIALIZED",
-                "tail": "", "patch_repairs": 0}
+                "tail": "", "patch_repairs": 0, "beats_baseline": None, "baseline_kind": "NOT_RUN", "baseline_tail": ""}
     # Disable bytecode caching for materialized runs: rapid same-size rewrites (e.g. `return 41`→`return 42`
     # within the same second) defeat __pycache__'s mtime+size invalidation, so a fresh `python` would import
     # STALE bytecode and report a false RED/GREEN. With no .pyc ever written, the source is always read fresh.
@@ -476,6 +490,13 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
             tx.rollback()
             return ev
 
+        # 2b) BASELINE SEPARATION: apply the best KNOWN family on top of the test, in its own transaction, and run
+        # the SAME test. If the known family turns it GREEN, the test does not separate the idea from that family
+        # (the anti-collage rule made executable). The baseline is always rolled back before the implementation.
+        baseline = cd.get("baseline_patch")
+        if baseline:
+            ev.update(_run_baseline(baseline, repo_root, cmd, runner=runner, timeout=timeout, env=env))
+
         # 3) apply the implementation, run GREEN (with bounded repair)
         impl = cd.get("implementation_patch")
         if impl:
@@ -510,6 +531,31 @@ def _materialize(cd: Dict, repo_root: str, *, runner: CommandRunner, timeout: in
         return ev
 
 
+def _run_baseline(baseline: str, repo_root: str, cmd, *, runner: CommandRunner, timeout: int, env: Dict) -> Dict:
+    """Run the test under the known-family baseline and ALWAYS restore the post-test state. Returns
+    {beats_baseline, baseline_kind, baseline_tail}: True when the baseline leaves the test RED on an assertion
+    (the known family cannot do it), False when it goes GREEN (it can), None when the baseline could not be applied
+    or failed for an unrelated reason (collection/timeout ⇒ no evidence either way)."""
+    out = {"beats_baseline": None, "baseline_kind": "NOT_APPLIED", "baseline_tail": ""}
+    bplan = parse_unified_diff(baseline)
+    ok, errs = validate_patch_paths(bplan, repo_root)
+    if not ok:
+        out["baseline_tail"] = "rejected unsafe baseline_patch: " + "; ".join(errs)
+        return out
+    btx = PatchTransaction(repo_root)
+    try:
+        if not btx.apply(bplan)["applied"]:
+            out["baseline_tail"] = "baseline_patch did not apply"
+            return out
+        r = runner.run(cmd, cwd=repo_root, timeout=timeout, env=env)
+        kind = classify_test_outcome(r)
+        out["baseline_kind"], out["baseline_tail"] = kind, r.tail()
+        out["beats_baseline"] = (False if kind == "GREEN" else True if kind == "RED_ASSERTION" else None)
+        return out
+    finally:
+        btx.rollback()
+
+
 # ── the prompt (every round carries archive elites + failures + verifier tail + prior-art + forbidden cells) ──
 def _build_prompt(problem, pack, archive, failures, verifier_tail, prior_art_warn, forbidden, samples,
                   memory_block: str = "") -> str:
@@ -536,7 +582,10 @@ def _build_prompt(problem, pack, archive, failures, verifier_tail, prior_art_war
         L.append(memory_block)
     L += [f"\nReturn {samples} DIFFERENT candidates as a JSON array. {_SCHEMA_HINT}",
           "Each must break a DIFFERENT assumption and include a failing test_patch (real assertion, not a "
-          "broken import) plus an implementation_patch that changes real source — not one that skips the test."]
+          "broken import) plus an implementation_patch that changes real source — not one that skips the test.",
+          "Also give baseline_patch: the strongest KNOWN FAMILY applied to the same code. A candidate whose test the "
+          "known family also passes is NOT separated from it and is rejected — design the test around what ONLY "
+          "the broken assumption makes possible."]
     return "\n".join(L)
 
 
@@ -563,6 +612,8 @@ class LLMSearchResult:
     red_collection_count: int = 0
     error_timeout_count: int = 0
     green_final_count: int = 0
+    baseline_checked_count: int = 0       # candidates whose test was also run under the known-family baseline
+    baseline_separated_count: int = 0     # ... where the known family stayed RED (the idea is separated from it)
     rebrand_count: int = 0
     duplicates_rejected: int = 0
     json_repairs: int = 0
@@ -585,13 +636,14 @@ class LLMSearchResult:
             "red_assertion": self.red_assertion_count, "red_collection": self.red_collection_count,
             "error_timeout": self.error_timeout_count, "red_first": self.red_first_count,
             "green_final": self.green_final_count, "rebrands_blocked": self.rebrand_count,
+            "baseline_checked": self.baseline_checked_count, "baseline_separated": self.baseline_separated_count,
             "duplicates_rejected": self.duplicates_rejected,
             "repairs": {"json": self.json_repairs, "test": self.test_repairs, "impl": self.impl_repairs},
             "archive_coverage": self.archive.coverage(), "qd_score": self.archive.qd_score(),
             "best": None if not b else {
                 "name": b.name, "score": b.score, "verdict": b.verdict,
                 "components": score_components(b.evidence), "green_final": b.evidence.get("green_final"),
-                "red_kind": b.evidence.get("red_kind"),
+                "red_kind": b.evidence.get("red_kind"), "beats_baseline": b.evidence.get("beats_baseline"),
                 "prior_art_scope": b.evidence.get("prior_art_scope"),
                 "prior_art_scoped_verdict": b.evidence.get("prior_art_scoped_verdict"),
                 "prior_art_coverage_level": b.evidence.get("prior_art_coverage_level"),
@@ -607,7 +659,8 @@ class LLMSearchResult:
              f" · repairs json/test/impl: {self.json_repairs}/{self.test_repairs}/{self.impl_repairs}",
              f"- materialized: {self.materialized_count} · RED_ASSERTION: {self.red_assertion_count} · "
              f"RED_COLLECTION: {self.red_collection_count} · GREEN-final: {self.green_final_count} · "
-             f"rebrands blocked: {self.rebrand_count} · duplicates rejected: {self.duplicates_rejected}",
+             f"rebrands blocked: {self.rebrand_count} · duplicates rejected: {self.duplicates_rejected} · "
+             f"separated from known family: {self.baseline_separated_count}/{self.baseline_checked_count}",
              f"- archive coverage: {self.archive.coverage()} cells · QD-score {self.archive.qd_score()}"]
         if b:
             c = score_components(b.evidence)
@@ -734,7 +787,11 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                                        max_test_repairs=max_test_repairs, max_impl_repairs=max_impl_repairs,
                                        keep_failed=keep_failed, dry_run=dry_run, telemetry=tel)
                     ev.update(materialized=mat["materialized"], red_first=mat["red_first"],
-                              red_kind=mat["red_kind"], green_final=mat["green_final"])
+                              red_kind=mat["red_kind"], green_final=mat["green_final"],
+                              beats_baseline=mat.get("beats_baseline"), baseline_kind=mat.get("baseline_kind"),
+                              baseline_family=str(cd.get("baseline_family") or ""))
+                    res.baseline_checked_count += int(mat.get("beats_baseline") is not None)
+                    res.baseline_separated_count += int(bool(mat.get("beats_baseline")))
                     res.materialized_count += int(mat["materialized"])
                     res.red_first_count += int(mat["red_first"])
                     res.red_assertion_count += int(mat["red_kind"] == "RED_ASSERTION")
@@ -749,7 +806,9 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                 res.candidates.append(LLMCandidate(name=cand.name, score=score, verdict=verdict,
                                                    candidate=cand, evidence=ev))
                 if score < 0.3:
-                    reason = ("RED_COLLECTION not RED_ASSERTION" if ev.get("red_kind") == "RED_COLLECTION" else
+                    fam = ev.get("baseline_family") or "the known family"
+                    reason = (f"not separated: {fam} also passes the test" if ev.get("beats_baseline") is False else
+                              "RED_COLLECTION not RED_ASSERTION" if ev.get("red_kind") == "RED_COLLECTION" else
                               "no GREEN / unmaterialized test" if not ev.get("green_final") else "low evidence")
                     failures.append(f"{cand.name}: {reason}")
                     res.rejected.append({"name": cand.name, "reason": reason})

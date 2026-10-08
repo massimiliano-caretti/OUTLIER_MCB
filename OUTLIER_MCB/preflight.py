@@ -19,7 +19,8 @@ def preflight_creative_request(prompt: str,
                                repo_context: Optional[Union[str, object]] = None,
                                failure_memory: Optional[Dict] = None,
                                pack: Optional[DomainPack] = None,
-                               repo_path: Optional[str] = None) -> PreflightResult:
+                               repo_path: Optional[str] = None,
+                               memory=None) -> PreflightResult:
     """Route to a pack (with full decision evidence), then run the kernel.
 
     Grounding is STRUCTURED: pass a `RepoContext` as `repo_context`, or a `repo_path` to probe one — it
@@ -40,9 +41,19 @@ def preflight_creative_request(prompt: str,
     # ── evidence-based routing; an explicit pack always wins ──
     decision = route_pack(problem, repo=repo, pack=pack)
     the_pack = pack if pack is not None else get_pack(decision.selected_pack)
+    # persistent failure memory (opt-in): spent breaks are demoted and named — on a COPY of the pack
+    from .failure_feedback import resolve_store, spent_markdown
+    store = resolve_store(memory)
+    if store is not None:
+        the_pack = store.apply(the_pack)
 
     signals = (failure_memory or {}).get("signals") if isinstance(failure_memory, dict) else None
     result = kernel.preflight(problem, the_pack, signals=signals)
+    spent = spent_markdown(store, the_pack.name)
+    if spent:
+        result["spent_breaks"] = store.spent(the_pack.name)
+        result["rejected_ideas"] = store.rejected_ideas(the_pack.name)
+        result["instructions"] = result["instructions"] + spent
 
     confident = decision.used_explicit_pack or (
         decision.selected_pack != "generic" and decision.confidence >= 1 and not decision.ambiguous)
@@ -93,7 +104,7 @@ preflight = preflight_creative_request
 
 
 def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provider=None,
-             diagram: bool = False) -> str:
+             diagram: bool = False, memory=None) -> str:
     """THE one-call entrypoint for a coding assistant. One prompt in → one ready-to-follow brief out.
 
         import OUTLIER_MCB as gsl
@@ -104,7 +115,7 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
     `diagram=True` appends a Mermaid view of the assumption graph (opt-in; off by default so the standard
     brief is unchanged).
     """
-    pf = preflight_creative_request(prompt, pack=pack)
+    pf = preflight_creative_request(prompt, pack=pack, memory=memory)
     # real-time research: if the domain is unknown but the caller supplied a research provider, SOURCE the
     # domain from the web (provisional, cited) instead of refusing — the engine still falsifies.
     if pf.get("elicitation_required") and provider is not None:
@@ -116,7 +127,7 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
             header = ("[OUTLIER_MCB sourced an unknown domain from the web — " + meta["warning"] + "\n"
                       " sources: " + "; ".join(s.get("url", s.get("title", "")) for s in meta["sources"][:5])
                       + f"  · pack_quality={meta['quality']}]\n")
-            return header + creative(prompt, pack=built, k=k)
+            return header + creative(prompt, pack=built, k=k, memory=memory)
         except ResearchError:
             pass            # no usable sources → fall through to the honest elicitation scaffold below
     out = [pf["instructions"]]
@@ -138,6 +149,10 @@ def creative(prompt: str, pack: Optional[DomainPack] = None, k: int = 3, provide
         from . import kernel
         from .pack import get_pack
         p = pack or get_pack(pf["pack"])
+        from .failure_feedback import resolve_store
+        store = resolve_store(memory)
+        if store is not None:
+            p = store.apply(p)                      # the branches below must see the same demoted ranking
         out.append("\n[divergence] Branches in tension — choose ONE assumption to break, then falsify it:")
         for b in kernel.branch_on_assumptions(prompt, p, k=k):
             out.append(f"  [{b['stance']:11s}] break '{b['assumption']}' on axis {b['axis']} → {b['negation']}")

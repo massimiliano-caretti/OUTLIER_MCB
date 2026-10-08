@@ -26,6 +26,9 @@ STEP 0 (anti-mode): first write your 3-5 most-likely DEFAULT answers; then
 breaks what they share. Every final idea must be TAIL vs those answers (check with --idea "<idea>").
 PASSO 0: scrivi prima le tue 3-5 risposte di default; ogni idea finale deve essere TAIL rispetto a esse.
 
+MEMORY: add --memory .outlier_mcb/failure_memory.json to route/brief/creative/judge — what already died is
+demoted and listed; never re-propose it. / Non riproporre ciò che è già morto.
+
 RULES (non-negotiable):
 1. Never answer a novelty/invention request from memory — run the library first.
 2. Break a hidden assumption and name it; breaking none = INSIDE_THE_BOX (not an answer).

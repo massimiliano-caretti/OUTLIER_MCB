@@ -92,7 +92,7 @@ class Judgment:
 
 def judge(idea: str, prompt: str = "", pack=None, repo_path: Optional[str] = None,
           assumption: str = "", breaks: Optional[List[str]] = None, provider=None,
-          first_principles: bool = False, mode=None) -> Judgment:
+          first_principles: bool = False, mode=None, memory=None) -> Judgment:
     """Run the full rigor on a free-text idea the assistant proposes. Returns a single, actionable verdict.
 
     `first_principles=True` additionally attaches a FirstPrinciplesCritique — falsifiable objections derived
@@ -102,7 +102,10 @@ def judge(idea: str, prompt: str = "", pack=None, repo_path: Optional[str] = Non
     `mode` = the model's own declared typical answers (a list of strings, or a ModeMap from `declare_mode`). Then
     the idea is also gated against THAT box: a MODE_ECHO / NEAR_MODE (a variant of the default answer) is
     INSIDE_THE_BOX, and — with no explicit pack — the request-specific mode pack is used, so a TAIL idea is
-    mapped to the shared feature it actually drops instead of to a generic assumption."""
+    mapped to the shared feature it actually drops instead of to a generic assumption.
+
+    `memory` (a FailureStore, a JSON path, or None → $OUTLIER_MCB_MEMORY) persists every NEGATIVE verdict, so the
+    next creative() demotes the break that just died and lists the rejected idea (see failure_feedback)."""
     from .pack import select_pack, get_pack
     from .kernel import no_solution_before_assumption
     from .dossier import dossier as build_dossier
@@ -269,6 +272,18 @@ def judge(idea: str, prompt: str = "", pack=None, repo_path: Optional[str] = Non
     if first_principles:
         from .first_principles_reviewer import first_principles_attack
         fp = first_principles_attack(idea, claim=idea, breaks=broke)
+
+    from .failure_feedback import resolve_store
+    store = resolve_store(memory)
+    if store is not None:
+        dead = verdict if verdict in ("INSIDE_THE_BOX", "DEAD_BY_BARRIER") else (
+            novelty.status if novelty is not None and novelty.status in ("RENAMED", "COLLAGE") else "")
+        if dead:
+            try:
+                store.record(the_pack.name, idea, dead, assumption=asm, axis=axis, reason=next_step)
+                store.save()
+            except Exception:
+                pass                                   # persistence must never block a verdict
 
     return Judgment(idea=idea, verdict=verdict, status=doss.maturity.status, verifiability=vclass,
                     broken_assumption=(asm or None), dossier=doss, gate=gate, next_step=next_step,

@@ -22,6 +22,12 @@ they share is THIS request's box — request-specific, unlike the generic pack. 
 answer) is `INSIDE_THE_BOX`; only `TAIL` ideas may go on to the world-test and prior-art audit. TAIL is necessary,
 never sufficient. / Passo 0: scrivi prima le tue risposte di default; ogni idea finale deve essere TAIL.
 
+## MEMORY — never re-propose what already died
+
+Use `--memory .outlier_mcb/failure_memory.json` (or `OUTLIER_MCB_MEMORY`) on `route` / `brief` / `creative` /
+`judge`: negative verdicts persist, the spent break is demoted, and the brief lists the rejected ideas. In the LLM
+loop a candidate's `baseline_patch` (best known family) must leave its test RED — else it is NOT separated.
+
 ## AUTO-ACTIVATION (do this without being asked)
 
 When the user's request contains any **creativity trigger** — in any language —

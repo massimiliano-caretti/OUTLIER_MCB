@@ -29,7 +29,7 @@ def _read(p):
 def cmd_creative(a):
     from .preflight import creative
     problem = _read(a.problem) or "invent a genuinely new solution for <describe your problem>"
-    print(creative(problem, k=a.k))
+    print(creative(problem, k=a.k, memory=getattr(a, "memory", None)))
 
 
 def cmd_invent(a):
@@ -193,14 +193,28 @@ def cmd_activate(a):
 def cmd_brief(a):
     """The one-call standing brief for a request — rules + which assumption to break."""
     from .activation import assistant_brief
-    print(assistant_brief(_read(a.problem)))
+    print(assistant_brief(_read(a.problem), memory=getattr(a, "memory", None)))
 
 
 def cmd_route(a):
     """Compact per-turn route for assistants that call the library continuously."""
     from .activation import assistant_route
-    route = assistant_route(_read(a.problem), full_brief=getattr(a, "full_brief", False))
+    route = assistant_route(_read(a.problem), full_brief=getattr(a, "full_brief", False),
+                            memory=getattr(a, "memory", None))
     print(json.dumps(route.as_dict(), indent=2) if getattr(a, "json", False) else route.markdown())
+
+
+def cmd_judge(a):
+    """Discipline ONE idea: verdict + next step (+ mode gate with --answer, + persisted failure with --memory)."""
+    from .judge import judge
+    j = judge(_read(a.idea), prompt=_read(a.problem) if a.problem else "", mode=(a.answer or None),
+              memory=a.memory)
+    if a.json:
+        print(json.dumps({"verdict": j.verdict, "broken_assumption": j.broken_assumption,
+                          "confidence": j.confidence, "next_step": j.next_step,
+                          "mode": j.mode.as_dict() if j.mode is not None else None}, indent=2, ensure_ascii=False))
+    else:
+        print(j.markdown())
 
 
 def cmd_mode(a):
@@ -239,7 +253,8 @@ def cmd_lint(a):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="OUTLIER_MCB"); sub = ap.add_subparsers(dest="cmd", required=True)
-    p = sub.add_parser("creative"); p.add_argument("--problem"); p.add_argument("-k", type=int, default=3); p.set_defaults(f=cmd_creative)
+    p = sub.add_parser("creative"); p.add_argument("--problem"); p.add_argument("-k", type=int, default=3)
+    p.add_argument("--memory", help="failure-memory JSON (default: $OUTLIER_MCB_MEMORY)"); p.set_defaults(f=cmd_creative)
     p = sub.add_parser("invent"); p.add_argument("--problem"); p.add_argument("--beam", type=int, default=5); p.add_argument("--rounds", type=int, default=2); p.set_defaults(f=cmd_invent)
     p = sub.add_parser("preflight"); p.add_argument("--problem"); p.add_argument("--pack"); p.add_argument("--out"); p.set_defaults(f=cmd_preflight)
     p = sub.add_parser("branch"); p.add_argument("--problem"); p.add_argument("-k", type=int, default=3); p.set_defaults(f=cmd_branch)
@@ -268,10 +283,15 @@ def main(argv=None):
     p = sub.add_parser("self-evolve"); p.add_argument("--target", required=True); p.add_argument("--budget", type=int, default=5)
     p.add_argument("--apply", action="store_true", help="actually apply (default: dry-run)"); p.set_defaults(f=cmd_self_evolve)
     p = sub.add_parser("activate"); p.set_defaults(f=cmd_activate)
-    p = sub.add_parser("brief"); p.add_argument("--problem", required=True); p.set_defaults(f=cmd_brief)
+    p = sub.add_parser("brief"); p.add_argument("--problem", required=True); p.add_argument("--memory")
+    p.set_defaults(f=cmd_brief)
     p = sub.add_parser("route"); p.add_argument("--problem", required=True)
     p.add_argument("--json", action="store_true"); p.add_argument("--full-brief", dest="full_brief", action="store_true")
-    p.set_defaults(f=cmd_route)
+    p.add_argument("--memory"); p.set_defaults(f=cmd_route)
+    p = sub.add_parser("judge"); p.add_argument("--idea", required=True); p.add_argument("--problem")
+    p.add_argument("--answer", action="append", default=[], help="one of YOUR default answers (anti-mode gate)")
+    p.add_argument("--memory", help="record a negative verdict here (default: $OUTLIER_MCB_MEMORY)")
+    p.add_argument("--json", action="store_true"); p.set_defaults(f=cmd_judge)
     p = sub.add_parser("mode"); p.add_argument("--problem", required=True)
     p.add_argument("--answer", action="append", default=[], help="one of YOUR default answers (repeat 3-5 times)")
     p.add_argument("--idea"); p.add_argument("-k", type=int, default=3); p.add_argument("--json", action="store_true")

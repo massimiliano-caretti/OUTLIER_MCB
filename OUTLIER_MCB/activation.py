@@ -139,7 +139,7 @@ class AssistantRoute:
         return "\n".join(lines)
 
 
-def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = False) -> AssistantRoute:
+def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = False, memory=None) -> AssistantRoute:
     """Per-turn router for an LLM that uses OUTLIER_MCB continuously.
 
     `assistant_brief()` is intentionally exhaustive and good for first activation. This function is the compact
@@ -156,7 +156,7 @@ def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = Fa
         )
 
     from .preflight import preflight_creative_request
-    pf = preflight_creative_request(prompt, pack=pack)
+    pf = preflight_creative_request(prompt, pack=pack, memory=memory)
     rec = pf.get("recommended_direction") or {}
     missing = pf.get("missing_information") or {}
     elicitation = bool(pf.get("elicitation_required"))
@@ -187,7 +187,11 @@ def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = Fa
         f"Recommended break: {rec.get('assumption', '—')} on {rec.get('dimension', '—')}"
         + (" (generic fallback — prefer the anti-mode breaks)." if elicitation else "."),
         f"Death-gate: {pf.get('death_gate', '—')}",
-    ])
+    ] + ([f"Already spent (do NOT re-propose): " + "; ".join(f"{s['assumption']}×{s['deaths']}"
+                                                        for s in pf["spent_breaks"][:5])]
+         if pf.get("spent_breaks") else [])
+       + ([f"Already rejected ideas: " + "; ".join(f"«{i[:60]}»" for i in pf["rejected_ideas"][:4])]
+          if pf.get("rejected_ideas") else []))
     return AssistantRoute(
         prompt=prompt or "",
         activate=True,
@@ -200,16 +204,16 @@ def assistant_route(prompt: str, pack=None, provider=None, full_brief: bool = Fa
         break_axis=rec.get("dimension", ""),
         novelty_scope_required=True,
         must_report=must_report,
-        brief=assistant_brief(prompt, pack=pack, provider=provider) if full_brief else compact,
+        brief=assistant_brief(prompt, pack=pack, provider=provider, memory=memory) if full_brief else compact,
         preflight=pf,
     )
 
 
-def assistant_brief(prompt: str, pack=None, provider=None) -> str:
+def assistant_brief(prompt: str, pack=None, provider=None, memory=None) -> str:
     """The one-call standing brief: the non-negotiable rules + the engine's preflight for THIS request (which
     assumption to break, the death-gate, the forbidden families). Paste-and-obey for any LLM assistant."""
     from .preflight import creative
-    return STANDING_RULES + "\n\n" + creative(prompt, pack=pack, provider=provider)
+    return STANDING_RULES + "\n\n" + creative(prompt, pack=pack, provider=provider, memory=memory)
 
 
 def activation_snippet() -> str:

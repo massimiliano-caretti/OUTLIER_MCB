@@ -51,6 +51,20 @@ python -m OUTLIER_MCB mode --problem "<request>" --answer "<default 1>" --answer
 python -m OUTLIER_MCB mode --problem "<request>" --answer ... --idea "<your idea>"     # → MODE_ECHO | NEAR_MODE | TAIL
 ```
 
+## Memory of what already died (persistent)
+
+Set `OUTLIER_MCB_MEMORY=.outlier_mcb/failure_memory.json` (or pass `--memory <path>` / `memory=<path>`). Every
+negative `judge` verdict (INSIDE_THE_BOX, DEAD_BY_BARRIER, RENAMED/COLLAGE prior art) is recorded; the next
+`creative` / `route` / `brief` demotes the break that died (one priority level per two deaths) and lists the ideas
+already rejected — do NOT re-propose them. / Ogni verdetto negativo viene ricordato: non riproporre ciò che è già morto.
+
+```bash
+python -m OUTLIER_MCB judge --problem "<request>" --idea "<your idea>" --answer "<default 1>" --memory .outlier_mcb/failure_memory.json
+```
+
+In the LLM loop, every candidate also carries a `baseline_patch` (the best KNOWN family on the same code): its
+test must stay RED under the baseline and go GREEN under the idea, otherwise it is "not separated" and rejected.
+
 ## The non-negotiable rules (why this exists)
 
 1. **Do NOT answer a 'new / novel / invent / discover' request from memory.** Run the library first; it

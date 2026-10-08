@@ -99,9 +99,12 @@ def _ranked_breakable(pack, g: AssumptionGraph) -> List[str]:
     re-orders within an equal axis priority and is a no-op when failure_memory is empty, so existing
     behaviour is preserved until a pack actually accumulates failures."""
     dr = g.data_requirements()
+    worn = {n: _failure_count(pack, n) for n in g.breakable()}
+    # WEAR: every two recorded deaths cost one priority level, so a repeatedly-failed break eventually yields to a
+    # lower-priority but unspent one (one death only re-orders within the priority, as before).
     return sorted(g.breakable(),
-                  key=lambda n: (-_priority(pack, pack.dimension_of.get(n, "")),
-                                 _failure_count(pack, n), 0 if dr.get(n) else 1, n))
+                  key=lambda n: (-(_priority(pack, pack.dimension_of.get(n, "")) - worn[n] // 2),
+                                 worn[n], 0 if dr.get(n) else 1, n))
 
 
 def _distinct_axis_breaks(pack, ranked: List[str], k: int) -> List[tuple]:

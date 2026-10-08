@@ -377,6 +377,8 @@ __toolbox__ = [
     # anti-mode: leave YOUR OWN declared default answer (step 0 of the routine)
     "anti_mode_protocol", "mode_brief", "declare_mode", "mode_distance", "mode_pack", "ModeMap", "ModeDistance",
     "MODE_VERDICTS",
+    # persistent failure memory: negative verdicts demote the spent break in the next brief
+    "FailureStore", "resolve_failure_store", "NEGATIVE_VERDICTS",
     # routing evidence
     "select_pack", "route_pack", "RouteDecision", "pack_quality",
     # kernel + scoring
@@ -592,6 +594,7 @@ __toolbox__ = [
 ]
 
 # ── anti-mode: the model's own declared default answers become the request-specific box to leave ──
+from .failure_feedback import FailureStore, resolve_store as resolve_failure_store, NEGATIVE_VERDICTS
 from .mode_box import (declare_mode, mode_pack, mode_distance, mode_brief, anti_mode_protocol, ModeMap,
                        ModeDistance, MODE_VERDICTS)
 
