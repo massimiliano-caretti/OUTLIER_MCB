@@ -7,7 +7,7 @@ name = "OUTLIER_MCB"
 dynamic = ["version"]
 description = "A domain-agnostic assumption-negation + falsification engine for grounded, rigorous creativity in coding assistants."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "Massimiliano Caretti", email = "massimiliano.caretti@gmail.com" }]
 keywords = [
@@ -36,6 +36,7 @@ dependencies = []
 [project.optional-dependencies]
 test = ["pytest>=7"]
 claude = ["anthropic>=1.0"]
+math = ["sympy"]
 
 [project.urls]
 Homepage = "https://github.com/massimiliano-caretti/OUTLIER_MCB"

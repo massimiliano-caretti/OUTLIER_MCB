@@ -36,6 +36,24 @@ All notable changes to OUTLIER_MCB are documented here. The format follows
 
 ## [Unreleased]
 
+### Documentation — a new front page and a manual
+- **README** rebuilt as a front door: what the library does in three sentences, a 60-second try-out (no model,
+  local model, online model), the method as a figure, a "pick your path" table, the measured results with their
+  limits, and what the library is not.
+- **`docs/MANUAL.md`**: ten short lessons from installation to model-driven runs, local and online. Every lesson has
+  a goal, commands, real captured output, an explanation and a self-check. The manual ends with a cheat sheet
+  (provider specs, environment variables, commands), every verdict in one table, and troubleshooting.
+- **`docs/REFERENCE.md`** keeps the complete technical description that used to live in the README.
+- **Figures** (`docs/assets/`, light and dark): built from one script (`build_figures.py`), with a two-hue palette
+  validated for colour-vision deficiency. Survived and killed ideas are marked by ✓ / ✗, never by colour alone.
+
+### Fixed — continuous integration
+- CI had been failing since before these changes, for two reasons:
+  - three tests assumed SymPy, which the CI runner does not install. They now skip with a stated reason when SymPy
+    is absent, and the CI installs it through a new `math` extra so they still run;
+  - Python 3.8 lacks `ast.unparse`. It reached end of life in October 2024, so `requires-python` is now `>=3.9`.
+- The CI matrix now covers 3.9–3.13, plus a `zero-deps` job that installs nothing optional.
+
 ### Added — a measured A/B of the divergent phase on a real local model
 - **`evals/divergence_ab.py`**: 12 requests in different domains, three conditions (direct answer, legacy loop,
   divergent phase) and six single-technique ablations. Each request is scored against the model's own default

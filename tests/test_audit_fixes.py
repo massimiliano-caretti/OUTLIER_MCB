@@ -73,6 +73,7 @@ def test_verified_useful_novelty_downgraded_without_online_search():
 
 # ── F10 (HIGH): the scrambled-target negative control must be EARNED (non-vacuous), not a tautology ──
 def test_open_ended_negative_control_is_earned_not_vacuous():
+    pytest.importorskip("sympy")                    # the symbolic check of a recovered law needs SymPy
     from evals.benchmarks.open_ended import SEED_CURRICULUM, recover_generated, _to_feynman
     from evals.benchmarks.feynman import generate_dataset, _r2
     from evals.self_improve_loop import _base_terms

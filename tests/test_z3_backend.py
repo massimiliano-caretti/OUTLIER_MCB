@@ -4,6 +4,8 @@ Z3 proves what SymPy's identity check cannot (inequalities, statements under hyp
 GUARANTEED counterexample when a claim is false. Zero hard dependency: absent ⇒ TOOL_UNAVAILABLE, never a
 crash, and identities still prove via SymPy. Robust whether or not z3-solver is installed.
 """
+import pytest
+
 import OUTLIER_MCB as gsl
 
 
@@ -51,6 +53,7 @@ def test_proves_under_hypothesis_or_unavailable():
 
 def test_identity_still_proved_without_z3_via_sympy():
     # with the backend present but z3 maybe absent, an identity must still come out FORMALLY_PROVED (SymPy).
+    pytest.importorskip("sympy")                    # the zero-dependency path cannot prove it, and says so
     conj = gsl.Conjecture("(x+1)^2 = x^2+2x+1", lhs="(x+1)**2", rhs="x**2+2*x+1", variables={"x": (-3.0, 3.0)})
     res = gsl.investigate_conjecture(conj, backend=gsl.z3_backend())
     assert res.status == "FORMALLY_PROVED"

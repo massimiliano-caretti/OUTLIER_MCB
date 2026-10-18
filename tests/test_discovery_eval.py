@@ -4,6 +4,8 @@ This is the honest payoff test: not 'the structure looks rigorous' but 'on data 
 whole creative stack (problem-finding + blending + transformation + memory + affect), settled by the
 symbolic/causal evaluator, confirms exactly the assumption the data support'. Deterministic, offline.
 """
+import importlib.util
+
 from evals.discovery_eval import run_discovery_eval
 
 
@@ -19,6 +21,9 @@ def test_inventor_settles_on_the_data_true_assumption():
 
 def test_new_capabilities_are_measured():
     caps = run_discovery_eval()["capabilities"]
+    if not (importlib.util.find_spec("sympy") or importlib.util.find_spec("z3")):
+        # proving a TRUE identity needs SymPy or z3; without either the engine reports it unproved (correctly)
+        assert caps.pop("math_true_supported") is False
     assert all(caps.values()), f"a new-capability check failed: {caps}"
 
 
