@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple, Union
 
 from .embeddings import semantic_distance
-from .llm import call_llm, supports_sampling, _extract_json
+from .llm import call_llm, sampler_controls, supports_roles, supports_sampling, _extract_json
 
 # distant discipline lenses (Deng et al.: ordinary personas already partition knowledge; distance adds spread)
 DEFAULT_PERSONAS: Tuple[str, ...] = (
@@ -49,6 +49,14 @@ DEFAULT_PERSONAS: Tuple[str, ...] = (
     "a linguist who thinks in representations, grammars, compression and ambiguity",
     "an operations researcher who thinks in queues, flows, scheduling and bottlenecks",
 )
+
+# The sampler profile of the divergent phase where the provider exposes the controls. Sampling at T=1 from the full
+# distribution degenerates through the unreliable tail, and nucleus truncation (top_p ≈ 0.9–0.95) keeps it coherent
+# while a fixed top-k cut ignores the shape of the distribution (Holtzman et al., "The Curious Case of Neural Text
+# Degeneration", ICLR 2020) — so the divergent phase samples the model's own distribution (T=1) with a nucleus cut
+# and no top-k (Ollama's default top_k=40 is a chat-tuned cut). min_p / top_n_sigma stay opt-in: the evidence for
+# min_p is disputed (arXiv:2506.13681), and top_n_sigma is not honoured by every server (Ollama ignores it).
+AUTO_DIVERGE_SAMPLING: Dict = {"top_p": 0.95, "top_k": 0}
 
 _DIVERGE_SYSTEM = ("Divergent phase. Generate genuinely different directions, not variations of the standard answer. "
                    "No code and no self-evaluation: only observations and intents in the requested line format.")
@@ -68,8 +76,8 @@ class DivergenceConfig:
     intents_per_call: int = 5
     diverge_temperature: float = 1.0
     converge_temperature: float = 0.2
-    diverge_sampling: Dict = field(default_factory=dict)    # e.g. {"min_p": 0.05} or {"top_n_sigma": 1.0}
-    converge_sampling: Dict = field(default_factory=dict)
+    diverge_sampling: Optional[Dict] = None     # None = AUTO_DIVERGE_SAMPLING ∩ what the provider honours;
+    converge_sampling: Optional[Dict] = None    # an explicit dict (e.g. {"min_p": 0.05}) is forwarded as given
     novelty_min_distance: float = 0.25          # intents nearer than this to a known/denied text are discarded
     tail_probability: float = 0.35              # verbalized p above this = the model's own mode → ranked last
     auto_mode: bool = True                      # elicit the model's default answers when none are declared
@@ -88,13 +96,15 @@ class DivergenceConfig:
 
 
 def resolve_divergence(divergence: Union[None, bool, Mapping, DivergenceConfig], llm) -> Optional[DivergenceConfig]:
-    """The config to run with, or None for the legacy single-call path. `None` = AUTO: on exactly when the
-    provider declares it honours per-call sampling (`supports_sampling`, i.e. the local HTTP providers), so every
-    existing provider keeps its exact previous behaviour. `True` forces the defaults, a mapping overrides them."""
+    """The config to run with, or None for the legacy single-call path. `None` = AUTO: on for the library's own
+    providers, local or online (`supports_roles`), and for any provider declaring `supports_sampling` — the
+    prompt-level techniques help every model, the sampler ones are applied only where honoured (see
+    `resolve_sampling`). Duck-typed providers keep their exact previous behaviour. `True` forces the defaults,
+    a mapping overrides them."""
     if isinstance(divergence, DivergenceConfig):
         return divergence
     if divergence is None:
-        return DivergenceConfig() if supports_sampling(llm) else None
+        return DivergenceConfig() if (supports_roles(llm) or supports_sampling(llm)) else None
     if divergence is True:
         return DivergenceConfig()
     if divergence is False:
@@ -102,6 +112,32 @@ def resolve_divergence(divergence: Union[None, bool, Mapping, DivergenceConfig],
     if isinstance(divergence, Mapping):
         return DivergenceConfig(**dict(divergence))
     raise TypeError(f"divergence must be None, bool, a mapping or DivergenceConfig, got {type(divergence).__name__}")
+
+
+def resolve_sampling(config: DivergenceConfig, llm) -> Tuple[DivergenceConfig, Dict]:
+    """Fix the sampler options of each phase for THIS provider, and report which levers are real.
+
+    AUTO (None) keeps only the AUTO_DIVERGE_SAMPLING controls the diverge-role provider honours (none for current
+    Claude models, top_p for OpenAI, top_p+top_k for Ollama / llama.cpp); an explicit dict is forwarded unchanged
+    (call_llm and the provider still drop and report what they cannot take). The report states, per phase, whether
+    the provider honours temperature at all — online models that do not still get every prompt-level technique."""
+    import dataclasses
+    report: Dict = {}
+    resolved: Dict = {}
+    for phase, role, requested, auto, temperature in (
+            ("diverge", "diverge", config.diverge_sampling, AUTO_DIVERGE_SAMPLING, config.diverge_temperature),
+            ("converge", "converge", config.converge_sampling, {}, config.converge_temperature)):
+        controls = sampler_controls(llm, role)
+        if requested is None:
+            options = {k: v for k, v in auto.items() if k in controls}
+            dropped = sorted(set(auto) - set(options))
+        else:
+            options, dropped = dict(requested), []
+        resolved[phase] = options
+        report[phase] = {"temperature": temperature, "temperature_honoured": "temperature" in controls,
+                         "options": dict(options), "not_honoured": dropped, "controls": sorted(controls)}
+    return dataclasses.replace(config, diverge_sampling=resolved["diverge"],
+                               converge_sampling=resolved["converge"]), report
 
 
 @dataclass
@@ -287,7 +323,7 @@ def elicit_mode(problem: str, pack, llm, config: DivergenceConfig):
     from .mode_box import declare_mode
     outs = call_llm(llm, mode_prompt(problem, pack, config.mode_answers), system=_MODE_SYSTEM,
                     temperature=config.converge_temperature, n=1, role="mode", seed=config.seed,
-                    **config.converge_sampling)
+                    **(config.converge_sampling or {}))
     answers, probs = parse_mode_answers(outs[0] if outs else "")
     return (declare_mode(problem, answers, probs) if answers else None), 1
 
@@ -397,7 +433,7 @@ def diverge_round(problem: str, pack, llm, config: DivergenceConfig, denial: Den
         prompt = diverge_prompt(problem, pack, persona, denial, config.intents_per_call,
                                 config.max_denials_in_prompt, assumptions)
         outs = call_llm(llm, prompt, system=_DIVERGE_SYSTEM, temperature=config.diverge_temperature, n=1,
-                        role="diverge", seed=seed, **config.diverge_sampling)
+                        role="diverge", seed=seed, **(config.diverge_sampling or {}))
         out.calls += 1
         out.personas.append(persona)
         for comp in outs:

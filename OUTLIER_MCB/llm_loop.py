@@ -14,7 +14,7 @@ elites + a diversity gate), Reflexion / Self-Refine (failures become the next pr
 repair of the single broken field), Novelty Search / prior-art gate (a graded verdict over claim+name+
 rationale+world-test+patch-intent, never "absolute novelty"). Fully opt-in: no `llm`, no behaviour change.
 
-With a sampling-aware provider (a local model, see `local_llm`) each round first runs a DIVERGENT phase
+With one of the library's providers (local: `local_llm`; online: `online_llm`) each round first runs a DIVERGENT phase
 (`llm_divergence`: anti-mode, hot independent persona calls, verbalized-probability intents, denial constraints,
 novelty rejection, niche-aware selection) and then one COOL convergent call per selected intent; the candidates
 it yields go through exactly the same gates and execution as before.
@@ -29,7 +29,8 @@ from .generators import Candidate, breakable
 from .qd import QDArchive
 from .llm import parse_candidates, call_llm
 from .llm_divergence import (DivergenceConfig, Intent, build_denial_set, calibrated_mode_near, converge_block,
-                             diverge_round, elicit_mode, mean_pairwise_distance, resolve_divergence)
+                             diverge_round, elicit_mode, mean_pairwise_distance, resolve_divergence,
+                             resolve_sampling)
 from .patches import (parse_unified_diff, validate_patch_paths, PatchTransaction,
                       patch_substance_evidence)
 from .runner import CommandRunner, scrubbed_env
@@ -764,6 +765,13 @@ class LLMSearchResult:
                      f"answers denied) · intents generated/selected: {dv.get('intents_generated', 0)}/"
                      f"{dv.get('intents_selected', 0)} · rejected: {rej} · "
                      f"fallback rounds: {dv.get('fallback_rounds', 0)} · candidate spread: {self.candidate_spread()}")
+            hot = dv.get("sampler", {}).get("diverge", {})
+            if hot and not hot.get("temperature_honoured"):
+                L.append("- sampler: the provider does not take a temperature — prompt-level divergence only "
+                         "(anti-mode, personas, verbalized tail, denial); hot/cool split not applied")
+            elif hot:
+                L.append(f"- sampler: diverge T={hot.get('temperature')} {hot.get('options') or ''} · converge "
+                         f"T={dv['sampler'].get('converge', {}).get('temperature')}")
         if self.provider_error:
             L.append(f"- ⚠ provider error (samples discarded): {self.provider_error}")
         if self.reflections:
@@ -789,8 +797,9 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
     default (`set_default_llm` / OUTLIER_MCB_LLM).
 
     `divergence` selects how each round's candidates are PROPOSED: None (auto) runs the divergent → convergent
-    phase (`llm_divergence`) exactly when the provider declares `supports_sampling` (the local HTTP providers) and
-    the legacy single call otherwise; True / a mapping / a DivergenceConfig forces it on; False forces it off.
+    phase (`llm_divergence`) for the library's providers, local or online (`supports_roles` / `supports_sampling`),
+    with sampler options limited to what the provider honours (`resolve_sampling`), and the legacy single call for
+    any other provider; True / a mapping / a DivergenceConfig forces it on; False forces it off.
     The divergent phase makes `diverge_calls` + one call per selected intent per round (+1 mode call once).
     `mode` declares your default answers (anti-mode); in the divergent phase they are denied and every intent must
     leave them, and without it the model is asked for its own (DivergenceConfig.auto_mode). `memory` (a
@@ -825,6 +834,9 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
     recorded_deaths = 0
     dead_ideas: List[str] = []                        # "name: claim" of every candidate that died this run
     cfg = resolve_divergence(divergence, llm)
+    sampler_report: Dict = {}
+    if cfg is not None:
+        cfg, sampler_report = resolve_sampling(cfg, llm)
     mode_map, mode_source = None, "none"
     if mode:
         mode_map, mode_source = declare_mode(problem, list(mode)), "declared"
@@ -837,7 +849,7 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
     if cfg is not None:
         res.divergence = {"enabled": True, "mode_source": mode_source, "mode_answers": mode_answers,
                           "intents_generated": 0, "intents_selected": 0, "rejections": {}, "fallback_rounds": 0,
-                          "personas": [], "intents": []}
+                          "personas": [], "intents": [], "sampler": sampler_report}
     denial_block = _legacy_denial_block(mode_answers, remembered)
 
     def record_death(cd: Dict, cand: Candidate, verdict: str, reason: str) -> None:
@@ -1050,7 +1062,7 @@ def _divergent_completions(res: LLMSearchResult, llm, cfg: DivergenceConfig, pro
         prompt = _build_prompt(*prompt_args, samples, denial_block=_legacy_denial_block(mode_answers, remembered),
                                **prompt_kw)
         outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=samples,
-                        role="converge", seed=seed, **cfg.converge_sampling)
+                        role="converge", seed=seed, **(cfg.converge_sampling or {}))
         res.llm_call_count += 1
         return [(c, None) for c in outs]
     completions: List[Tuple[str, Optional[Intent]]] = []
@@ -1058,7 +1070,7 @@ def _divergent_completions(res: LLMSearchResult, llm, cfg: DivergenceConfig, pro
         prompt = _build_prompt(*prompt_args, 1, intent_block=converge_block(intent),
                                denial_block=_legacy_denial_block(mode_answers, remembered), **prompt_kw)
         outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=1, role="converge",
-                        seed=None if seed is None else seed + j, **cfg.converge_sampling)
+                        seed=None if seed is None else seed + j, **(cfg.converge_sampling or {}))
         res.llm_call_count += 1
         completions += [(c, intent) for c in outs]
     return completions

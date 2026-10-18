@@ -79,6 +79,21 @@ def _is_request_feature(stem: str, request: set) -> bool:
     return all(is_request(part) for part in stem.split("_"))
 
 
+# Words right after a contrast cue name what the idea LEAVES ("instead of a fixed window", "replaces token buckets
+# with …", "senza contatori"): naming the box to negate it is not reusing it. EN + IT, like the rest of the contract.
+_CONTRAST_RE = re.compile(
+    r"\b(?:instead\s+of|rather\s+than|in\s+place\s+of|unlike|replac(?:e|es|ed|ing)|without|no\s+longer|"
+    r"eliminat(?:e|es|ed|ing)|abandon(?:s|ed|ing)?|beyond|not|no|versus|vs\.?|"
+    r"invece\s+(?:di|del|della|dei|delle)|anzich[eé]|al\s+posto\s+(?:di|del|della)|senza|non|sostituisce|elimina)"
+    r"\s+((?:(?!with\b|by\b|con\b|tramite\b)[^\s,;:.()\[\]—]+\s*){1,4})",
+    re.IGNORECASE)
+
+
+def _without_contrast(text: str) -> str:
+    """`text` with the up-to-4 words after each contrast cue removed (stopping at punctuation or 'with'/'by')."""
+    return _CONTRAST_RE.sub(" ", str(text or ""))
+
+
 def _slug(stem: str) -> str:
     return re.sub(r"\W+", "_", stem).strip("_") or "feature"
 
@@ -220,7 +235,7 @@ def mode_distance(idea: str, mode: ModeMap, embedder=None, near: float = 0.55) -
                 (a variant of the default). TAIL — it breaks ≥1 shared feature AND is far from every typical answer.
     TAIL is a precondition for novelty, never a certificate of it."""
     emb = embedder if embedder is not None else default_embedder()
-    feats = _features(idea)
+    feats = _features(_without_contrast(idea))           # what the idea USES, not what it says it leaves
     stems = {p for s in feats for p in s.split("_")}
     has = {s: all(p in stems for p in s.split("_")) for s in mode.shared}   # 'bucket of tokens' keeps 'token bucket'
     kept = [mode.surface[s] for s in mode.shared if has[s]]

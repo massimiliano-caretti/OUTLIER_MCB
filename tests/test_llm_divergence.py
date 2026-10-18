@@ -150,7 +150,7 @@ def test_specs_resolve_to_the_right_provider_and_env_routes_the_divergent_role(m
     assert provider_from_spec("ollama-raw:qwen3:8b").completion is True
     oa = provider_from_spec("openai-raw:m@http://h:8080/v1")
     assert isinstance(oa, OpenAICompatibleLLMProvider) and oa.completion and oa.base_url == "http://h:8080/v1"
-    for bad in ("openai:m", "ollama:", "nope:x", "plain"):
+    for bad in ("openai-raw:m", "ollama:", "nope:x", "plain"):
         assert provider_from_spec(bad) is None
     assert isinstance(_llm_from_spec("ollama:qwen3:8b"), OllamaLLMProvider)
     gsl.reset_default_llm()
@@ -326,6 +326,19 @@ def test_request_words_are_not_a_reused_mechanism():
     idea = "Adversarial-gradient rate limiter: throttle clients by the gradient of their error rate"
     assert mode_distance(idea, mode).verdict == "TAIL"
     assert mode_distance("token bucket per API client", mode).verdict in ("MODE_ECHO", "NEAR_MODE")
+
+
+def test_naming_the_box_to_negate_it_is_not_reusing_it():
+    """Live run: 'predator-prey dynamics replace fixed window counters' was branded a component swap of 'Fixed window
+    rate limiter'. Words after a contrast cue (EN + IT) are what the idea leaves; a real variant still is NEAR_MODE."""
+    from OUTLIER_MCB.mode_box import mode_distance
+    mode = declare_mode("invent a new way to rate-limit API clients",
+                        ["Fixed window rate limiter", "Token bucket algorithm"])
+    for idea in ("Epoch-independent predator-prey dynamics replace fixed window counters with population cycles",
+                 "instead of a token bucket, clients trade unused quota in an internal market",
+                 "invece di una finestra fissa, cicli preda-predatore regolano la capacità"):
+        assert mode_distance(idea, mode).verdict == "TAIL", idea
+    assert mode_distance("a fixed window limiter with a larger window", mode).verdict == "NEAR_MODE"
 
 
 def test_niche_key_maps_phrasing_onto_the_pack_assumption():

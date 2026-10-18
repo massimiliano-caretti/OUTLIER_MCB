@@ -125,7 +125,8 @@ def cmd_llm_search(a):
         llm = _llm_from_spec(a.llm)
         if llm is None:
             print(f"error: unrecognised --llm spec {a.llm!r} (ollama:<model>[@host] · ollama-raw:… · "
-                  "openai:<model>@<base_url> · openai-raw:… · subprocess:<command>)")
+                  "openai:<model>[@<base_url>] · openai-raw:… · claude:[<model>] · gemini:/openrouter:/mistral:/"
+                  "deepseek:/groq:<model> · subprocess:<command>)")
             return
     else:
         print("error: --llm-cmd (a CLI reading the prompt on stdin) or --llm (e.g. ollama:qwen3:8b) is required")
@@ -283,7 +284,8 @@ def main(argv=None):
     p = sub.add_parser("self-improve"); p.add_argument("--budget", type=int, default=30); p.set_defaults(f=cmd_self_improve)
     p = sub.add_parser("llm-search"); p.add_argument("--problem"); p.add_argument("--repo-path", dest="repo_path", default=".")
     p.add_argument("--llm-cmd", dest="llm_cmd"); p.add_argument("--budget", type=int, default=30)
-    p.add_argument("--llm", help="provider spec, e.g. ollama:qwen3:8b · openai:<model>@http://localhost:8080/v1")
+    p.add_argument("--llm", help="provider spec: ollama:<model> · openai:<model>[@<base_url>] · claude:[<model>] · "
+                                  "gemini: / openrouter: / mistral: / deepseek: / groq:<model>")
     p.add_argument("--diverge-llm", dest="diverge_llm",
                    help="provider for the divergent phase (e.g. a base model: ollama-raw:<model>)")
     p.add_argument("--divergence", choices=("auto", "on", "off"), default="auto",

@@ -246,9 +246,9 @@ kernel, **not** an agent.
 ### Local models: a divergent → convergent phase
 
 With a local model the loop can reach the levers a CLI pipe cannot: a per-call temperature, the sampler, and the
-choice between a base model and its chat version. A sampling-aware provider (`OllamaLLMProvider`,
-`OpenAICompatibleLLMProvider` for llama.cpp / vLLM / LM Studio) switches each round to a two-phase search built
-from techniques with published evidence:
+choice between a base model and its chat version. Every provider of the library — local (`OllamaLLMProvider`,
+`OpenAICompatibleLLMProvider` for llama.cpp / vLLM / LM Studio) or online (below) — switches each round to a
+two-phase search built from techniques with published evidence:
 
 | step | what it does | evidence |
 |---|---|---|
@@ -269,7 +269,23 @@ res = gsl.llm_openended_search("invent X", llm, mode=["my default answer"], memo
 print(res.markdown())                                          # intents generated/selected/rejected, candidate spread
 ```
 
-Without code: `OUTLIER_MCB_LLM=ollama:qwen3:8b` (optionally `OUTLIER_MCB_LLM_DIVERGE=ollama-raw:<base-model>`), or
+**Online models.** The same phase runs on hosted models: `gsl.AnthropicLLMProvider()` (Claude through the official
+SDK, `pip install anthropic`; effort via `effort=`, refusal fallback enabled on the models that support it) and
+`gsl.online_provider("openai" | "gemini" | "openrouter" | "mistral" | "deepseek" | "groq", model)` (key from
+`OPENAI_API_KEY`, `GEMINI_API_KEY`, …). The prompt-level techniques work on every model; the sampler levers are
+applied only where the provider honours them, and the report says which ones were real:
+
+| lever | local (Ollama / llama.cpp / vLLM) | OpenAI-compatible APIs | Claude (current models) |
+|---|---|---|---|
+| anti-mode, personas, verbalized tail, denial, intent → development, novelty rejection | ✓ | ✓ | ✓ |
+| hot diverge / cool converge temperature | ✓ | ✓ (reasoning models refuse it: learned from the first 400, then dropped) | ✗ (400 on temperature; older models such as Opus 4.6 still take it) |
+| nucleus cut, no top-k (`top_p=0.95, top_k=0`, Holtzman et al. ICLR 2020) | ✓ | top_p only | ✗ |
+| base model in raw completion for the divergent phase (West & Potts 2025) | ✓ | ✗ | ✗ |
+| min_p / top_n_sigma (opt-in) | min_p ✓; top_n_sigma on llama.cpp (Ollama ignores it) | ✗ | ✗ |
+| per-sample seeds (reproducible runs) | ✓ | ✓ | ✗ |
+
+Without code: `OUTLIER_MCB_LLM=ollama:qwen3:8b` / `claude:` / `openai:gpt-…` / `gemini:…` (optionally
+`OUTLIER_MCB_LLM_DIVERGE=ollama-raw:<base-model>`, which mixes a local base model with any converger), or
 `python -m OUTLIER_MCB llm-search --llm ollama:qwen3:8b --problem "…"`. `OUTLIER_MCB_EMBEDDER=ollama:nomic-embed-text`
 gives the novelty filters real semantics. Truncation samplers (`min_p`, `top_k`, `top_n_sigma`) are passed through
 `DivergenceConfig(diverge_sampling=…)` but never on by default: the evidence for min_p is disputed. Plain temperature

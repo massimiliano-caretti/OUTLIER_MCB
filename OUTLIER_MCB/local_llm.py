@@ -1,4 +1,5 @@
-"""local_llm — stdlib-only HTTP providers for LOCAL models (Ollama, llama.cpp server, vLLM, LM Studio).
+"""local_llm — stdlib-only HTTP providers for LOCAL models (Ollama, llama.cpp server, vLLM, LM Studio) and for
+OpenAI-compatible ONLINE APIs (OpenAI, Gemini, OpenRouter, Mistral, DeepSeek, Groq — see `online_llm`).
 
 Why a local model needs its own provider: the levers that measurably widen what a model proposes live in the
 SAMPLER and in the CHOICE OF MODEL, and a CLI pipe (`SubprocessLLMProvider`) cannot reach them —
@@ -13,8 +14,12 @@ SAMPLER and in the CHOICE OF MODEL, and a CLI pipe (`SubprocessLLMProvider`) can
 
 Every provider keeps the library protocol `complete(prompt, *, system, temperature, n) -> list[str]` and accepts
 extra sampling keywords (`role`, `seed`, `min_p`, `top_p`, `top_k`, `max_tokens`, …) that `llm.call_llm` forwards
-only to providers able to take them. `n` samples are drawn as n INDEPENDENT requests (local servers commonly
-ignore `n`), each with its own seed when a seed is given, so the samples cannot silently be n copies of one.
+only to providers able to take them. Each provider DECLARES the sampler controls it honours (`sampler_controls`) so
+the search knows which levers are real: measured on Ollama 0.34, `min_p` is honoured and `top_n_sigma` is silently
+ignored, so it is not declared there. A control an API rejects at run time (HTTP 400 naming it — e.g. temperature on
+OpenAI reasoning models) is dropped, remembered in `rejected_params`, and the request is retried once without it.
+`n` samples are drawn as n INDEPENDENT requests (local servers commonly ignore `n`), each with its own seed when a
+seed is given, so the samples cannot silently be n copies of one.
 
 Transport failures never raise into the search loop: like the subprocess provider, a failed sample becomes a
 `{"_error": …}` JSON string, which the candidate parser discards with a recorded reason (and `last_error` keeps
@@ -38,10 +43,10 @@ _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _OLLAMA_OPTIONS = frozenset({
     "seed", "top_k", "top_p", "min_p", "typical_p", "repeat_penalty", "repeat_last_n", "presence_penalty",
     "frequency_penalty", "num_predict", "num_ctx", "stop", "mirostat", "mirostat_tau", "mirostat_eta"})
-# top-level sampling fields an OpenAI-compatible LOCAL server accepts beyond the OpenAI set (llama.cpp / vLLM).
-_OPENAI_FIELDS = frozenset({
-    "seed", "top_p", "max_tokens", "stop", "presence_penalty", "frequency_penalty",
-    "min_p", "top_k", "top_n_sigma", "typical_p", "repeat_penalty"})
+# the sampling fields the OpenAI API itself accepts (and therefore every online OpenAI-compatible API, at most).
+_OPENAI_ONLINE_FIELDS = frozenset({"seed", "top_p", "max_tokens", "stop", "presence_penalty", "frequency_penalty"})
+# … plus the samplers a LOCAL OpenAI-compatible server accepts as top-level fields (llama.cpp / vLLM).
+_OPENAI_FIELDS = _OPENAI_ONLINE_FIELDS | frozenset({"min_p", "top_k", "top_n_sigma", "typical_p", "repeat_penalty"})
 
 
 def strip_reasoning(text: str) -> str:
@@ -50,9 +55,17 @@ def strip_reasoning(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text or "").strip()
 
 
+class HTTPStatusError(OSError):
+    """A non-2xx reply; `status` and `body` let a provider react to a rejected parameter."""
+
+    def __init__(self, url: str, status: int, body: str):
+        super().__init__(f"HTTP {status} from {url}: {body[:300]}")
+        self.status, self.body = status, body
+
+
 def _post_json(url: str, payload: Dict, *, timeout: float, headers: Optional[Mapping[str, str]] = None) -> Dict:
     """POST `payload` as JSON and decode the JSON reply. Raises OSError/ValueError on transport or decode errors;
-    an HTTP error body is surfaced in the message (servers explain the problem there)."""
+    an HTTP error raises HTTPStatusError carrying the body (servers explain the problem there)."""
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(url, data=body, method="POST",
                                  headers={"Content-Type": "application/json", **dict(headers or {})})
@@ -60,8 +73,7 @@ def _post_json(url: str, payload: Dict, *, timeout: float, headers: Optional[Map
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
     except urllib.error.HTTPError as e:
-        detail = e.read().decode("utf-8", "replace")[:300]
-        raise OSError(f"HTTP {e.code} from {url}: {detail}") from e
+        raise HTTPStatusError(url, e.code, e.read().decode("utf-8", "replace")[:2000]) from e
 
 
 def _sample_seed(seed, i: int):
@@ -71,7 +83,17 @@ def _sample_seed(seed, i: int):
 
 class _HTTPProvider(LLMProvider):
     """Shared request loop: n independent samples, seeds spread per sample, failures recorded, never raised."""
-    supports_sampling = True          # tells the search loop it can drive temperature / role per call
+    supports_roles = True             # accepts role/seed keywords and reports what it honours
+    _controls: frozenset = frozenset()
+
+    @property
+    def sampler_controls(self) -> frozenset:
+        """The sampling keywords this provider actually puts on the wire (minus any the API rejected)."""
+        return frozenset(self._controls) - self.rejected_params
+
+    @property
+    def supports_sampling(self) -> bool:
+        return "temperature" in self.sampler_controls
 
     def __init__(self, model: str, *, completion: bool = False, timeout: float = 300.0,
                  options: Optional[Mapping] = None, max_tokens: Optional[int] = None):
@@ -84,6 +106,7 @@ class _HTTPProvider(LLMProvider):
         self.max_tokens = max_tokens
         self.last_error = ""
         self.ignored_options: set = set()
+        self.rejected_params: set = set()           # controls the API refused at run time (never sent again)
 
     def complete(self, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1,
                  **sampling) -> List[str]:
@@ -116,6 +139,7 @@ class OllamaLLMProvider(_HTTPProvider):
                  think: Optional[bool] = False, timeout: float = 300.0, options: Optional[Mapping] = None,
                  max_tokens: Optional[int] = None, keep_alive: Optional[str] = None):
         super().__init__(model, completion=completion, timeout=timeout, options=options, max_tokens=max_tokens)
+        self._controls = frozenset({"temperature", "max_tokens"} | _OLLAMA_OPTIONS)
         self.host = (host or os.environ.get("OLLAMA_HOST") or DEFAULT_OLLAMA_HOST).rstrip("/")
         if "://" not in self.host:
             self.host = "http://" + self.host
@@ -149,37 +173,73 @@ class OllamaLLMProvider(_HTTPProvider):
 
 
 class OpenAICompatibleLLMProvider(_HTTPProvider):
-    """Any OpenAI-compatible server (llama.cpp `llama-server`, vLLM, LM Studio, Ollama's /v1). Chat mode uses
-    /chat/completions; completion mode uses /completions (raw text, for base models). Local-server samplers
-    (min_p, top_k, top_n_sigma, …) are sent as top-level fields only when set. `api_key` defaults to the
-    OUTLIER_MCB_LLM_API_KEY env var; local servers usually need none."""
+    """Any OpenAI-compatible server: local (llama.cpp `llama-server`, vLLM, LM Studio, Ollama's /v1) or online
+    (OpenAI, Gemini, OpenRouter, Mistral, DeepSeek, Groq — `online_llm.online_provider`). Chat mode uses
+    /chat/completions; completion mode uses /completions (raw text, for base models).
+
+    `online=False` declares the local-server samplers (min_p, top_k, top_n_sigma, …) as honoured; `online=True`
+    declares only the OpenAI set (temperature, top_p, seed, penalties). The key comes from `api_key`, else the env
+    var `api_key_env` (default OUTLIER_MCB_LLM_API_KEY); a provider that names a key variable which is unset fails
+    each sample with a clear error instead of sending an anonymous request."""
 
     def __init__(self, model: str, base_url: str, *, completion: bool = False, api_key: Optional[str] = None,
-                 timeout: float = 300.0, options: Optional[Mapping] = None, max_tokens: Optional[int] = None):
+                 api_key_env: Optional[str] = None, online: bool = False, timeout: float = 300.0,
+                 options: Optional[Mapping] = None, max_tokens: Optional[int] = None):
         super().__init__(model, completion=completion, timeout=timeout, options=options, max_tokens=max_tokens)
         if not str(base_url or "").strip():
             raise ValueError("a base_url is required (e.g. http://localhost:8080/v1)")
         self.base_url = str(base_url).strip().rstrip("/")
-        self.api_key = api_key if api_key is not None else os.environ.get("OUTLIER_MCB_LLM_API_KEY", "")
+        self.online = bool(online)
+        self.api_key_env = api_key_env
+        env = api_key_env or "OUTLIER_MCB_LLM_API_KEY"
+        self.api_key = api_key if api_key is not None else os.environ.get(env, "")
+        self._controls = frozenset({"temperature"} | (_OPENAI_ONLINE_FIELDS if online else _OPENAI_FIELDS))
+        self._max_tokens_field = "max_tokens"
 
     def _request(self, prompt: str, system: str, temperature: float, seed, sampling: Dict) -> str:
-        payload: Dict = {"model": self.model, "temperature": float(temperature), "stream": False}
-        if seed is not None:
-            payload["seed"] = seed
-        for key, value in sampling.items():
-            if key in _OPENAI_FIELDS:
-                payload[key] = value
-            else:
+        if self.api_key_env and not self.api_key:
+            raise ValueError(f"no API key: set {self.api_key_env}")
+        payload: Dict = {"model": self.model, "stream": False}
+        candidates = {"temperature": float(temperature), "seed": seed, **sampling}
+        for key, value in candidates.items():
+            if value is None:
+                continue
+            if key in self.sampler_controls:
+                payload[self._max_tokens_field if key == "max_tokens" else key] = value
+            elif key not in self.rejected_params:
                 self.ignored_options.add(key)
         headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
         if self.completion:
             payload["prompt"] = (system + "\n\n" + prompt) if system else prompt
-            data = _post_json(self.base_url + "/completions", payload, timeout=self.timeout, headers=headers)
+            data = self._post_adaptive("/completions", payload, headers)
             return str(data["choices"][0]["text"])
         payload["messages"] = (([{"role": "system", "content": system}] if system else [])
                                + [{"role": "user", "content": prompt}])
-        data = _post_json(self.base_url + "/chat/completions", payload, timeout=self.timeout, headers=headers)
+        data = self._post_adaptive("/chat/completions", payload, headers)
         return str(data["choices"][0]["message"].get("content") or "")
+
+    def _post_adaptive(self, path: str, payload: Dict, headers: Dict) -> Dict:
+        """POST, and on a 400 that names a sampling field we sent, drop it for good and retry once. OpenAI's newer
+        models also rename `max_tokens` to `max_completion_tokens`; that rename is learned the same way."""
+        try:
+            return _post_json(self.base_url + path, payload, timeout=self.timeout, headers=headers)
+        except HTTPStatusError as e:
+            if e.status != 400:
+                raise
+            body = e.body.lower()
+            if "max_tokens" in payload and "max_completion_tokens" in body:
+                self._max_tokens_field = "max_completion_tokens"
+                payload["max_completion_tokens"] = payload.pop("max_tokens")
+                return _post_json(self.base_url + path, payload, timeout=self.timeout, headers=headers)
+            # OpenAI-style errors quote the parameter: "Unsupported parameter: 'temperature' …", "param": "…"
+            refused = [k for k in payload if k in self._controls
+                       and any(q + k + q in body for q in ("'", '"', "`"))]
+            if not refused:
+                raise
+            for key in refused:
+                self.rejected_params.add(key)
+                payload.pop(key, None)
+            return _post_json(self.base_url + path, payload, timeout=self.timeout, headers=headers)
 
 
 class RoleRoutedLLM(LLMProvider):
@@ -190,7 +250,7 @@ class RoleRoutedLLM(LLMProvider):
 
     Roles the search uses: "diverge", "converge", "mode", "repair". A role without its own provider (or a call
     without a role) goes to `default`."""
-    supports_sampling = True
+    supports_roles = True
 
     def __init__(self, default: LLMProvider, **by_role: LLMProvider):
         if default is None:
@@ -200,6 +260,14 @@ class RoleRoutedLLM(LLMProvider):
 
     def provider_for(self, role: Optional[str]) -> LLMProvider:
         return self.by_role.get(role or "", self.default)
+
+    def sampler_controls_for(self, role: Optional[str]) -> frozenset:
+        from .llm import sampler_controls
+        return sampler_controls(self.provider_for(role))
+
+    @property
+    def supports_sampling(self) -> bool:
+        return "temperature" in self.sampler_controls_for("diverge")
 
     def complete(self, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1,
                  role: Optional[str] = None, **sampling) -> List[str]:
@@ -215,26 +283,36 @@ def _split_at(rest: str):
 
 
 def provider_from_spec(spec: str) -> Optional[LLMProvider]:
-    """Build an HTTP provider from a spec, or None when the scheme is not an HTTP one. Recognised:
-      ollama:<model>[@<host>]           chat mode (instruct model)
-      ollama-raw:<model>[@<host>]       raw completion mode (base model)
-      openai:<model>@<base_url>         OpenAI-compatible chat
+    """Build a provider from a spec, or None when the scheme is unknown. Recognised:
+      ollama:<model>[@<host>]           local, chat mode (instruct model)
+      ollama-raw:<model>[@<host>]       local, raw completion mode (base model)
+      openai:<model>@<base_url>         OpenAI-compatible server at base_url (local samplers declared)
       openai-raw:<model>@<base_url>     OpenAI-compatible /completions (base model)
-    A malformed spec (no model, or openai without a base_url) resolves to None — never a silent wrong model."""
+      openai:<model>                    the OpenAI API itself (OPENAI_API_KEY)
+      claude:[<model>] / anthropic:…    Claude via the Anthropic SDK (default model when omitted)
+      gemini: / openrouter: / mistral: / deepseek: / groq:<model>   hosted OpenAI-compatible APIs
+    A malformed spec (no model, or openai-raw without a base_url) resolves to None — never a silent wrong model."""
     scheme, sep, rest = str(spec or "").partition(":")
     if not sep:
         return None
     scheme = scheme.strip().lower()
     model, location = _split_at(rest)
+    if scheme in ("claude", "anthropic"):
+        from .online_llm import online_from_spec
+        return online_from_spec(scheme, model)
     if not model:
         return None
     if scheme in ("ollama", "ollama-raw"):
         return OllamaLLMProvider(model, location, completion=scheme == "ollama-raw")
+    if scheme == "openai" and not location:
+        from .online_llm import online_provider
+        return online_provider("openai", model)
     if scheme in ("openai", "openai-raw"):
         if not location:
             return None
         return OpenAICompatibleLLMProvider(model, location, completion=scheme == "openai-raw")
-    return None
+    from .online_llm import online_from_spec
+    return online_from_spec(scheme, model)
 
 
 def ollama_embed_fn(model: str, host: Optional[str] = None, timeout: float = 120.0) -> Callable[[str], List[float]]:

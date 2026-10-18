@@ -36,6 +36,28 @@ All notable changes to OUTLIER_MCB are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — online models (Claude, OpenAI, Gemini, …) and provider-aware sampling
+- **`online_llm`** — `AnthropicLLMProvider` (Claude through the official Anthropic SDK, an optional dependency:
+  `pip install anthropic` or the `claude` extra): `effort`, server-side refusal fallback on the models that support
+  it, refusals and SDK errors as discarded error samples, temperature/top_p/top_k only for the older models that
+  still accept them. `online_provider(...)` presets for OpenAI, Gemini, OpenRouter, Mistral, DeepSeek and Groq, each
+  reading its own API-key env var. Specs `claude:[model]`, `openai:<model>` (no URL = the OpenAI API), `gemini:`,
+  `openrouter:`, `mistral:`, `deepseek:`, `groq:`.
+- Providers declare the sampler controls they honour (`sampler_controls`). An OpenAI-compatible provider learns a
+  parameter the API rejects (temperature on reasoning models, the `max_completion_tokens` rename) from the first 400
+  and retries once without it.
+- The divergent phase now runs for every library provider, local or online. Its sampler profile
+  (`resolve_sampling`) keeps only the controls each provider honours. By default this is a nucleus cut with no
+  top-k at T=1 (Holtzman et al., ICLR 2020) where available. The run reports, per phase, whether a temperature was
+  honoured at all.
+- Measured on Ollama 0.34: `min_p` is honoured and `top_n_sigma` is silently ignored. It is therefore not declared
+  for Ollama.
+
+### Fixed
+- `mode_box.mode_distance`: words right after a contrast cue ("instead of", "replaces … with", "without", "invece di",
+  "senza", …) name what the idea leaves. An idea that names the box in order to negate it is no longer a component
+  swap of it; a real variant still is `NEAR_MODE`. Found by a live run on a local model.
+
 ### Added — local models think outside the mode: a divergent → convergent LLM phase
 - **`local_llm`** — stdlib HTTP providers for local models: `OllamaLLMProvider` (chat, or raw completion for base
   models; `think: false` by default), `OpenAICompatibleLLMProvider` (llama.cpp, vLLM, LM Studio), and

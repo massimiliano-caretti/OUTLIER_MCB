@@ -50,9 +50,27 @@ def call_llm(llm, prompt: str, *, system: str = "", temperature: float = 0.8, n:
 
 
 def supports_sampling(llm) -> bool:
-    """True when the provider declares it honours per-call temperature/role (`supports_sampling = True`) — the
-    signal that turns on the divergent/convergent search by default. Duck-typed providers stay on the legacy path."""
+    """True when the provider declares it honours a per-call temperature (`supports_sampling`)."""
     return bool(getattr(llm, "supports_sampling", False))
+
+
+def supports_roles(llm) -> bool:
+    """True for providers built to take the search's role/seed keywords and to report what they honour (every
+    provider in local_llm / online_llm). With `supports_sampling`, this turns the divergent phase on by default;
+    duck-typed providers stay on the legacy single-call path."""
+    return bool(getattr(llm, "supports_roles", False))
+
+
+def sampler_controls(llm, role: Optional[str] = None) -> frozenset:
+    """The sampling keywords `llm` actually honours for `role`: a router's per-role answer, else the provider's
+    declared `sampler_controls`, else {temperature} for a provider that only declares `supports_sampling`."""
+    per_role = getattr(llm, "sampler_controls_for", None)
+    if callable(per_role):
+        return frozenset(per_role(role))
+    declared = getattr(llm, "sampler_controls", None)
+    if declared is not None:
+        return frozenset(declared)
+    return frozenset({"temperature"}) if supports_sampling(llm) else frozenset()
 
 
 class CallableLLMProvider(LLMProvider):
