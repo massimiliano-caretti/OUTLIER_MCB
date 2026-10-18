@@ -379,7 +379,8 @@ class ScriptedLocalModel:
 
 def test_divergent_search_runs_hot_persona_calls_then_cool_convergent_calls():
     model = ScriptedLocalModel()
-    res = gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3)
+    res = gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3,
+                                   divergence=DivergenceConfig(denial_in_prompt=True))
     roles = [c["role"] for c in model.calls]
     assert roles[0] == "mode" and roles[1:4] == ["diverge"] * 3 and set(roles[4:]) == {"converge"}
     div_calls = [c for c in model.calls if c["role"] == "diverge"]
@@ -405,7 +406,8 @@ def test_divergent_search_runs_hot_persona_calls_then_cool_convergent_calls():
 
 def test_every_intent_rejected_falls_back_to_a_cool_legacy_call():
     model = ScriptedLocalModel(intents_per_call=[["INTENT: per_client || use a token bucket per client || p=0.6"]])
-    res = gsl.llm_openended_search("invent a new rate limiter", model, budget=2, samples_per_round=2)
+    res = gsl.llm_openended_search("invent a new rate limiter", model, budget=2, samples_per_round=2,
+                                   divergence=DivergenceConfig(denial_in_prompt=True))
     assert res.divergence["fallback_rounds"] == 1 and res.divergence["intents_selected"] == 0
     fallback = [c for c in model.calls if c["role"] == "converge"]
     assert len(fallback) == 1 and fallback[0]["temperature"] == 0.2
@@ -415,7 +417,8 @@ def test_every_intent_rejected_falls_back_to_a_cool_legacy_call():
 def test_declared_mode_replaces_elicitation_and_is_denied():
     model = ScriptedLocalModel()
     res = gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3,
-                                   mode=["leaky bucket queue per tenant", "fixed window counter in redis"])
+                                   mode=["leaky bucket queue per tenant", "fixed window counter in redis"],
+                                   divergence=DivergenceConfig(denial_in_prompt=True))
     assert "mode" not in [c["role"] for c in model.calls]
     assert res.divergence["mode_source"] == "declared"
     assert "leaky bucket queue per tenant" in next(c for c in model.calls if c["role"] == "diverge")["prompt"]
@@ -441,7 +444,8 @@ def test_failure_memory_is_denied_and_this_runs_deaths_are_recorded(tmp_path):
     store.record(pack.name, "auction slots to the highest bidder every tick", "INSIDE_THE_BOX", assumption="per_client")
     store.save()
     model = ScriptedLocalModel()
-    gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3, memory=path)
+    gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3, memory=path,
+                             divergence=DivergenceConfig(denial_in_prompt=True))
     assert "auction slots to the highest bidder every tick" in next(
         c for c in model.calls if c["role"] == "diverge")["prompt"]
 
@@ -470,8 +474,9 @@ def test_candidate_echoing_the_declared_mode_is_rejected_and_remembered(tmp_path
 
 def test_divergent_phase_widens_the_spread_of_a_mode_collapsed_model():
     """A/B on the SAME stochastic model (seeded): a tempered, mode-collapsed sampler over a fixed idea pool that
-    honours explicit denials. Legacy = one call per round; divergent = anti-mode + hot persona intents + denial +
-    novelty rejection. The divergent phase must reach more DISTINCT ideas and a wider spread. This checks the
+    honours explicit denials (so denial_in_prompt is switched on here — on qwen3.5:4b the A/B run found the
+    opposite, which is why it is off by default). Legacy = one call per round; divergent = anti-mode + hot persona
+    intents + denial + novelty rejection. The divergent phase must reach more DISTINCT ideas and a wider spread. This checks the
     mechanism does what it is designed to do on a model with these properties — it is not evidence about any
     real model (that is what the live check and an A/B on real prompts are for)."""
     pool = ["token bucket per client", "sliding window counter", "fixed window counter", "leaky bucket queue",
@@ -506,7 +511,8 @@ def test_divergent_phase_widens_the_spread_of_a_mode_collapsed_model():
     legacy = gsl.llm_openended_search("invent a new rate limiter", Tempered(), budget=12, samples_per_round=4,
                                       divergence=False, max_per_assumption=99, max_per_cell=99)
     divergent = gsl.llm_openended_search("invent a new rate limiter", Tempered(), budget=12, samples_per_round=4,
-                                         max_per_assumption=99, max_per_cell=99)
+                                         max_per_assumption=99, max_per_cell=99,
+                                         divergence=DivergenceConfig(denial_in_prompt=True))
     distinct = lambda r: {c.name for c in r.candidates}
     assert len(distinct(divergent)) > len(distinct(legacy))
     assert not ({"token bucket per client", "sliding window counter"} & distinct(divergent))   # the mode is left
@@ -526,3 +532,60 @@ def test_intents_without_the_assumption_field_are_kept():
                         "INTENT: x || p=0.1")
     assert [(i.assumption, i.probability) for i in its] == [("", 0.06), ("per_client", 0.03), ("", None)]
     assert its[0].mechanism.startswith("make latency")
+
+
+def test_by_default_the_defaults_are_filtered_not_listed():
+    """The A/B run: naming the denied answers in the prompt pulled the ideas back toward them. By default they are
+    kept out of every prompt and enforced by the filters only."""
+    model = ScriptedLocalModel()
+    res = gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3)
+    prompts = [c["prompt"] for c in model.calls if c["role"] in ("diverge", "converge")]
+    assert prompts and not any("use a token bucket per client" in p or "DO NOT USE" in p
+                               or "YOUR DEFAULT ANSWERS" in p for p in prompts)
+    assert res.divergence["rejections"].get("MODE") == 1                   # the token-bucket variant still dies
+    assert not DivergenceConfig().verbalized_tail and not DivergenceConfig().denial_in_prompt
+
+
+class _DriftingModel(ScriptedLocalModel):
+    """Develops each intent into a default answer the first time, and correctly once told it drifted."""
+    def complete(self, prompt, *, system="", temperature=0.8, n=1, role=None, seed=None, **kw):
+        if role == "converge" and "  mechanism: " in prompt and "DRIFTED BACK" not in prompt:
+            self.calls.append({"role": role, "temperature": temperature, "seed": seed, "prompt": prompt})
+            cand = dict(_CAND_TEMPLATE, name="token bucket per client", claim="use a token bucket per client",
+                        broken_assumption="time_windowed")
+            return [json.dumps([cand])]
+        return super().complete(prompt, system=system, temperature=temperature, n=n, role=role, seed=seed, **kw)
+
+
+def test_a_development_that_drifts_into_the_mode_is_retried_once():
+    model = _DriftingModel()
+    res = gsl.llm_openended_search("invent a new rate limiter", model, budget=3, samples_per_round=3)
+    dv = res.divergence
+    assert res.mode_echoes_rejected == 3 and dv["drift_retries"] == 3 and dv["drift_recovered"] == 3
+    retries = [c for c in model.calls if c["role"] == "converge" and "DRIFTED BACK" in c["prompt"]]
+    assert len(retries) == 3 and all("use a token bucket per client" in r["prompt"] for r in retries)
+    assert {c.evidence["intent"]["assumption"] for c in res.candidates} == {"time_windowed", "per_client",
+                                                                           "fixed_budget"}
+    off = gsl.llm_openended_search("invent a new rate limiter", _DriftingModel(), budget=3, samples_per_round=3,
+                                   divergence=DivergenceConfig(drift_retries=False))
+    assert off.divergence["drift_retries"] == 0 and not off.candidates
+
+
+def test_an_invalid_convergent_completion_is_repaired_by_default():
+    class Garbled(ScriptedLocalModel):
+        def complete(self, prompt, *, system="", temperature=0.8, n=1, role=None, seed=None, **kw):
+            if role == "converge" and "  mechanism: " in prompt:
+                self.calls.append({"role": role, "prompt": prompt, "temperature": temperature, "seed": seed})
+                return ["sorry, here is my idea in prose"]
+            if "not a valid candidate JSON array" in prompt:
+                cand = dict(_CAND_TEMPLATE, name="repaired idea", claim="tenants trade unused quota",
+                            broken_assumption="per_client")
+                return [json.dumps([cand])]
+            return super().complete(prompt, system=system, temperature=temperature, n=n, role=role, seed=seed, **kw)
+    res = gsl.llm_openended_search("invent a new rate limiter", Garbled(), budget=3, samples_per_round=3)
+    # all three convergent completions were repaired; the identical repairs then meet the ordinary duplicate gate
+    assert res.json_repairs == 3 and res.valid_count == 3
+    assert [c.name for c in res.candidates] == ["repaired idea"] and res.duplicates_rejected == 2
+    plain = gsl.llm_openended_search("invent a new rate limiter", Garbled(), budget=3, samples_per_round=3,
+                                     divergence=DivergenceConfig(converge_json_repairs=0))
+    assert plain.json_repairs == 0 and not plain.candidates

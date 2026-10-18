@@ -256,8 +256,8 @@ two-phase search built from techniques with published evidence:
 | intent factorisation | short intents sampled hot (T=1.0), each developed by one cool convergent call (T=0.2) | Intent Factored Generation (ICML 2025) |
 | observations first | every divergent call writes observations, then intents built on them | PlanSearch (ICLR 2025) |
 | independent persona calls | each divergent call is a fresh context with a distant discipline lens | Deng et al. 2026; Meincke et al. 2024 |
-| verbalized sampling | intents carry a self-estimated typicality; the tail is preferred | Verbalized Sampling (2025) |
-| denial prompting | known families, the mode, this run's dead ideas and the failure memory are DO-NOT-USE constraints that grow each round | NeoCoder (NAACL 2025) |
+| verbalized sampling *(off by default)* | intents carry a self-estimated typicality; the tail is preferred | Verbalized Sampling (2025) |
+| denial *(filter on; prompt list off by default)* | known families, the mode, this run's dead ideas and the failure memory are rejected by the filters; listing them in the prompt is opt-in | NeoCoder (NAACL 2025) |
 | novelty rejection + niches | intents near anything denied are dropped before a call is spent; survivors are picked across distinct assumptions, empty archive niches first | OMNI-EPIC (ICLR 2025), QDAIF (ICLR 2024) |
 
 ```python
@@ -290,9 +290,17 @@ Without code: `OUTLIER_MCB_LLM=ollama:qwen3:8b` / `claude:` / `openai:gpt-…` /
 gives the novelty filters real semantics. Truncation samplers (`min_p`, `top_k`, `top_n_sigma`) are passed through
 `DivergenceConfig(diverge_sampling=…)` but never on by default: the evidence for min_p is disputed. Plain temperature
 is a weak creativity lever on its own (Peeperkorn et al., ICCC 2024), which is why it is only one step of six.
-`divergence=False` restores the single-call path; duck-typed providers keep it by default. None of this decides what
-is novel: every candidate still faces the prior-art gate and executable settlement, and no step asks a model to
-grade creativity (LLM judges favour familiar text).
+`divergence=False` restores the single-call path; duck-typed providers keep it by default.
+
+**Measured, not assumed** (`python -m evals.divergence_ab`, qwen3.5:4b, 12 requests, paired bootstrap): ideas that are
+still variants of the default fell from 41% (direct answer) to 9%. Two techniques from the literature hurt on this
+model and are therefore off by default: selecting the verbalized tail, and listing the denied answers in the prompt.
+Each can be switched back on (`DivergenceConfig(verbalized_tail=True, denial_in_prompt=True)`) for a model where a
+re-run shows the opposite. Developing an intent repairs invalid JSON and retries once when the result drifts back into
+a default answer.
+
+None of this decides what is novel: every candidate still faces the prior-art gate and executable settlement, and no
+step asks a model to grade creativity (LLM judges favour familiar text).
 
 ---
 

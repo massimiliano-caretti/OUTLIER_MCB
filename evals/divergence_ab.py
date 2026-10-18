@@ -5,8 +5,8 @@ Conditions, each asked for K ideas per request:
   B  legacy      — llm_openended_search with the single-call path (divergence=False).
   C  divergent   — llm_openended_search with the divergent → convergent phase.
 Ablations (measured on the SELECTED INTENTS of one divergent round, to keep the run affordable): the full phase,
-and the full phase minus one technique at a time — anti-mode, personas, observations-first, verbalized tail,
-denial in the prompt, novelty rejection. Seeds are shared, so every comparison is paired per request.
+and the full phase with one technique changed at a time — minus anti-mode, personas, observations-first or
+novelty rejection; plus the verbalized tail or the denial list in the prompt (both off by default). Seeds are shared, so every comparison is paired per request.
 
 The yardstick is independent of every condition: per request, the model is asked ONCE (its own call, seed 999)
 for its 5 default answers. All conditions are scored against that same mode. Metrics are automatic only — no
@@ -60,8 +60,8 @@ ABLATIONS: Dict[str, Dict] = {
     "no_anti_mode": {"auto_mode": False},
     "no_personas": {"personas": NEUTRAL_PERSONA},
     "no_observations": {"observations_first": False},
-    "no_verbalized_tail": {"verbalized_tail": False},
-    "no_denial_prompt": {"denial_in_prompt": False},
+    "plus_verbalized_tail": {"verbalized_tail": True},       # off by default since the first A/B run
+    "plus_denial_prompt": {"denial_in_prompt": True},         # off by default since the first A/B run
     "no_novelty_filter": {"novelty_min_distance": 0.0},
 }
 METRICS = ("tail_rate", "mode_dist", "distinct", "spread", "n_ideas", "calls", "secs")
@@ -276,7 +276,8 @@ def markdown(summary: Dict, meta: Dict) -> str:
         L.append(f"| {cond} | {s['n_requests']} | " + " | ".join(_fmt(s[m]) for m in METRICS) + " |")
     compared = _COMPARED
     sections = (("Paired comparisons", "comparisons"),
-                ("Ablations (full minus variant: > 0 means the technique helps)", "ablations"))
+                ("Ablations (full minus variant: for no_X, > 0 means X helps; for plus_X, > 0 means adding X "
+                 "hurts)", "ablations"))
     for title, block in sections:
         L += ["", f"## {title}", "", "| difference | " + " | ".join(compared) + " |", "|---|---|---|---|---|"]
         for name, vals in summary[block].items():

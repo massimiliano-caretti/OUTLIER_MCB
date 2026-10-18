@@ -53,6 +53,16 @@ All notable changes to OUTLIER_MCB are documented here. The format follows
     denied answers in the prompt.
   - One model and 12 requests: a large effect is detectable, a small one is not, and usefulness is not measured.
 
+### Changed — defaults follow the measurement
+- `DivergenceConfig.verbalized_tail` and `denial_in_prompt` now default to False. The denied answers are still
+  rejected by the filters, but are no longer named in any prompt of the divergent path.
+- The convergent phase no longer loses selected intents silently:
+  - `converge_json_repairs=1` repairs an invalid development;
+  - `drift_retries=True` re-develops an intent once when its candidate falls back into the mode, and the retry
+    names the default it drifted to;
+  - the intent's mechanism is required verbatim as the core of the claim.
+  - Telemetry: `drift_retries` / `drift_recovered`.
+
 ### Added — online models (Claude, OpenAI, Gemini, …) and provider-aware sampling
 - **`online_llm`** — `AnthropicLLMProvider` (Claude through the official Anthropic SDK, an optional dependency:
   `pip install anthropic` or the `claude` extra): `effort`, server-side refusal fallback on the models that support

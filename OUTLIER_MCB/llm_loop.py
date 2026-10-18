@@ -29,7 +29,7 @@ from .generators import Candidate, breakable
 from .qd import QDArchive
 from .llm import parse_candidates, call_llm
 from .llm_divergence import (VARIANT_DISTANCE, DivergenceConfig, Intent, build_denial_set, converge_block,
-                             diverge_round, elicit_mode, mean_pairwise_distance, resolve_divergence,
+                             diverge_round, drift_note, elicit_mode, mean_pairwise_distance, resolve_divergence,
                              resolve_sampling)
 from .patches import (parse_unified_diff, validate_patch_paths, PatchTransaction,
                       patch_substance_evidence)
@@ -763,7 +763,8 @@ class LLMSearchResult:
             rej = " · ".join(f"{k}={v}" for k, v in sorted(dv.get("rejections", {}).items())) or "none"
             L.append(f"- divergent phase: mode={dv.get('mode_source')} ({len(dv.get('mode_answers', []))} default "
                      f"answers denied) · intents generated/selected: {dv.get('intents_generated', 0)}/"
-                     f"{dv.get('intents_selected', 0)} · rejected: {rej} · "
+                     f"{dv.get('intents_selected', 0)} · rejected: {rej} · drift retries/recovered: "
+                     f"{dv.get('drift_retries', 0)}/{dv.get('drift_recovered', 0)} · "
                      f"fallback rounds: {dv.get('fallback_rounds', 0)} · candidate spread: {self.candidate_spread()}")
             hot = dv.get("sampler", {}).get("diverge", {})
             if hot and not hot.get("temperature_honoured"):
@@ -849,7 +850,8 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
     if cfg is not None:
         res.divergence = {"enabled": True, "mode_source": mode_source, "mode_answers": mode_answers,
                           "intents_generated": 0, "intents_selected": 0, "rejections": {}, "fallback_rounds": 0,
-                          "personas": [], "intents": [], "sampler": sampler_report}
+                          "drift_retries": 0, "drift_recovered": 0, "personas": [], "intents": [],
+                          "sampler": sampler_report}
     denial_block = _legacy_denial_block(mode_answers, remembered)
 
     def record_death(cd: Dict, cand: Candidate, verdict: str, reason: str) -> None:
@@ -882,11 +884,16 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                 res, llm, cfg, prompt_args, round_index=_r, samples=samples_per_round, mode_map=mode_map,
                 mode_near=mode_near, mode_answers=mode_answers, dead_ideas=dead_ideas, remembered=remembered,
                 prompt_kw={"memory_block": mem_block, "repo_block": repo_block})
-        for comp, intent in completions:
+        retried: set = set()                          # intents re-developed after drifting into the mode
+        recovered: set = set()
+        for comp, intent in completions:                # a drift retry appends to `completions` while it is read
             pr = parse_candidates(comp)
-            # JSON repair (§5): if a completion yielded nothing valid, ask for a corrected JSON array
+            # JSON repair (§5): if a completion yielded nothing valid, ask for a corrected JSON array (the divergent
+            # phase always allows its own repairs: a lost convergent completion is a lost selected intent)
+            repairs = max_json_repairs if (intent is None or cfg is None) else max(max_json_repairs,
+                                                                                    cfg.converge_json_repairs)
             tries = 0
-            while not pr.valid and tries < max_json_repairs:
+            while not pr.valid and tries < repairs:
                 tries += 1; res.json_repairs += 1
                 errs = "; ".join(e for d in pr.discarded for e in d.get("errors", []))
                 comp = _repair_field(llm, "json", errs or "not valid JSON")
@@ -928,7 +935,18 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                         failures.append(f"{cand.name}: {md.verdict}")
                         res.rejected.append({"name": cand.name, "reason": reason})
                         res.reflections.append(f"{cand.name} → {md.verdict}")
+                        if intent is not None and cfg is not None and cfg.drift_retries and id(intent) not in retried:
+                            retried.add(id(intent))         # one retry per intent, never a loop
+                            res.divergence["drift_retries"] += 1
+                            completions += _develop_intent(
+                                res, llm, cfg, prompt_args, intent, seed=None, remembered=remembered,
+                                mode_answers=mode_answers, prompt_kw={"memory_block": mem_block,
+                                                                      "repo_block": repo_block},
+                                note=drift_note(md.verdict, md.nearest_answer))
                         continue
+                    if intent is not None and id(intent) in retried and id(intent) not in recovered:
+                        recovered.add(id(intent))
+                        res.divergence["drift_recovered"] += 1
                 # diversity gate (§7): reject near-duplicates / over-crowded assumptions/cells
                 accepted, drop_reason = div.check(cd, cand, archive)
                 if not accepted:
@@ -1059,18 +1077,30 @@ def _divergent_completions(res: LLMSearchResult, llm, cfg: DivergenceConfig, pro
     seed = None if cfg.seed is None else cfg.seed + 7 * (round_index + 1)
     if not rnd.selected:
         dv["fallback_rounds"] += 1
-        prompt = _build_prompt(*prompt_args, samples, denial_block=_legacy_denial_block(mode_answers, remembered),
-                               **prompt_kw)
+        denial_block = _legacy_denial_block(mode_answers, remembered) if cfg.denial_in_prompt else ""
+        prompt = _build_prompt(*prompt_args, samples, denial_block=denial_block, **prompt_kw)
         outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=samples,
                         role="converge", seed=seed, **(cfg.converge_sampling or {}))
         res.llm_call_count += 1
         return [(c, None) for c in outs]
     completions: List[Tuple[str, Optional[Intent]]] = []
     for j, intent in enumerate(rnd.selected):
-        prompt = _build_prompt(*prompt_args, 1, intent_block=converge_block(intent),
-                               denial_block=_legacy_denial_block(mode_answers, remembered), **prompt_kw)
-        outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=1, role="converge",
-                        seed=None if seed is None else seed + j, **(cfg.converge_sampling or {}))
-        res.llm_call_count += 1
-        completions += [(c, intent) for c in outs]
+        completions += _develop_intent(res, llm, cfg, prompt_args, intent,
+                                       seed=None if seed is None else seed + j, remembered=remembered,
+                                       mode_answers=mode_answers, prompt_kw=prompt_kw)
     return completions
+
+
+def _develop_intent(res: LLMSearchResult, llm, cfg: DivergenceConfig, prompt_args: Tuple, intent: Intent, *,
+                    seed: Optional[int], remembered: Sequence[str], mode_answers: Sequence[str], prompt_kw: Dict,
+                    note: str = "") -> List[Tuple[str, Intent]]:
+    """ONE cool convergent call that develops `intent` into a full candidate (`note` = the drift retry notice).
+    The declared defaults and remembered dead ideas are listed only when `cfg.denial_in_prompt`: the A/B run found
+    that naming them in the prompt pulls the ideas back toward them."""
+    denial_block = _legacy_denial_block(mode_answers, remembered) if cfg.denial_in_prompt else ""
+    prompt = _build_prompt(*prompt_args, 1, intent_block=converge_block(intent, drift_note=note),
+                           denial_block=denial_block, **prompt_kw)
+    outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=1, role="converge",
+                    seed=seed, **(cfg.converge_sampling or {}))
+    res.llm_call_count += 1
+    return [(c, intent) for c in outs]

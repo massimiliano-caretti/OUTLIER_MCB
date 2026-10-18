@@ -95,10 +95,19 @@ class DivergenceConfig:
     personas: Tuple[str, ...] = DEFAULT_PERSONAS
     seed: Optional[int] = 0                     # per-call seeds derive from it; None = unseeded sampling
     max_denials_in_prompt: int = 12
-    # ablation switches — every technique can be turned off on its own to measure what it contributes
+    # ablation switches — every technique can be turned off on its own to measure what it contributes. The two
+    # defaults set to False follow the A/B run (evals/divergence_ab.py; qwen3.5:4b, 12 requests, paired bootstrap):
+    # selecting the self-reported tail and listing the denied answers in the prompt BOTH lowered the distance from
+    # the defaults and the spread of the intents, with 95% intervals excluding 0 (listing the defaults recalls
+    # them; the filter rejects them anyway). Verbalized sampling helped larger models most in its paper, so both
+    # stay available for models where a re-run shows the opposite.
     observations_first: bool = True             # PlanSearch: observations before intents
-    verbalized_tail: bool = True                # ask for p and prefer the tail when selecting
-    denial_in_prompt: bool = True               # list the denied texts in the prompt (filtering is separate)
+    verbalized_tail: bool = False               # ask for p and prefer the tail when selecting
+    denial_in_prompt: bool = False              # list the denied texts in the prompts (filtering is separate)
+    # the convergent phase: the A/B run lost a quarter of the selected intents while developing them (invalid JSON
+    # from a small model, or a development that drifted back into a default answer)
+    converge_json_repairs: int = 1              # repair a convergent completion that holds no valid candidate
+    drift_retries: bool = True                  # re-develop once an intent whose candidate fell back into the mode
 
     def __post_init__(self):
         if self.diverge_calls < 1 or self.intents_per_call < 1:
@@ -346,12 +355,25 @@ def diverge_prompt(problem: str, pack, persona: str, denial: DenialSet, k: int, 
     return "\n".join(lines)
 
 
-def converge_block(intent: Intent) -> str:
-    """The instruction appended to the loop's prompt for one convergent call: develop THIS intent rigorously."""
-    return "\n".join([
-        "DEVELOP THIS INTENT from the divergent phase — keep its broken assumption, make it rigorous and testable:",
-        f"  broken assumption: {intent.assumption or '(name it)'}",
-        f"  mechanism: {intent.mechanism}"])
+def converge_block(intent: Intent, drift_note: str = "") -> str:
+    """The instruction appended to the loop's prompt for one convergent call: develop THIS intent rigorously, with
+    its mechanism kept verbatim as the core of the claim. `drift_note` is added on a retry, after a development
+    fell back into a default answer."""
+    lines = ["DEVELOP THIS INTENT from the divergent phase — keep its broken assumption, make it rigorous and "
+             "testable:",
+             f"  broken assumption: {intent.assumption or '(name it)'}",
+             f"  mechanism: {intent.mechanism}",
+             "The mechanism above, in these words, must stay the core of the claim: do not replace it with a "
+             "standard technique, and do not turn it into a tuned version of the usual answer."]
+    if drift_note:
+        lines.append(drift_note)
+    return "\n".join(lines)
+
+
+def drift_note(verdict: str, nearest: str) -> str:
+    """The retry instruction after a development drifted back into the declared mode."""
+    return (f"YOUR PREVIOUS DEVELOPMENT DRIFTED BACK INTO A DEFAULT ANSWER ({verdict}, near «{nearest[:100]}»). "
+            "Develop the mechanism above itself — the default answer must not appear in the claim at all.")
 
 
 # ── the phase itself ──
