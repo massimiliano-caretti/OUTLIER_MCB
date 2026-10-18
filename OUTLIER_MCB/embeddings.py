@@ -11,7 +11,8 @@ model) without the library taking on the dependency or losing determinism by def
     gsl.diverge("…", embedder=emb)                                  # this call is SEMANTIC, cosine-based
 
 Lifting the ceiling everywhere, not call-by-call: the default is now PROCESS-WIDE RESOLVABLE. A single
-`gsl.set_default_embedder(emb)` (or `OUTLIER_MCB_EMBEDDER=sentence-transformers:<model>` in the env)
+`gsl.set_default_embedder(emb)` (or `OUTLIER_MCB_EMBEDDER=sentence-transformers:<model>` /
+`OUTLIER_MCB_EMBEDDER=ollama:<model>` in the env)
 upgrades EVERY `embedder=None` distance — novelty, judge, memory, frontier, blending — to real semantics,
 because `semantic_distance(...)` and `default_embedder()` resolve that default. With nothing registered and
 the var unset it stays lexical: deterministic, zero-dependency, the library never imports a model on its own.
@@ -157,8 +158,10 @@ def _build_from_spec(spec: str) -> Optional[object]:
     """Construct the embedder a spec asks for, or None to mean 'fall back to lexical'. Recognised:
       'lexical' (or empty)                  → None (lexical fallback, deterministic, zero-dep)
       'sentence-transformers:<model-name>'  → wrap a local sentence-transformers model (must be installed)
+      'ollama:<model>[@<host>]'             → a local Ollama embedding model (nomic-embed-text, bge-m3, …)
     A missing/broken model falls back to lexical instead of crashing — the model is the caller's dependency,
-    never the library's, and never imported eagerly at module load."""
+    never the library's, and never imported eagerly at module load. A network-backed model is probed once at
+    build time, so an unreachable server degrades to lexical here instead of failing inside every distance."""
     key = spec.lower()
     if not spec or key == "lexical":
         return None
@@ -170,6 +173,17 @@ def _build_from_spec(spec: str) -> Optional[object]:
             return CallableEmbedder(lambda text: list(model.encode(str(text))))
         except Exception:
             return None                                        # honest fallback: a missing model ⇒ lexical, not a crash
+    if key.startswith("ollama:"):
+        from .local_llm import _split_at, ollama_embed_fn
+        model_name, host = _split_at(spec.split(":", 1)[1])
+        if not model_name:
+            return None
+        fn = ollama_embed_fn(model_name, host)
+        try:
+            fn("probe")
+        except (OSError, ValueError, KeyError, IndexError, TypeError):
+            return None
+        return CallableEmbedder(fn)
     return None                                                # unknown scheme ⇒ lexical, never a silent wrong model
 
 

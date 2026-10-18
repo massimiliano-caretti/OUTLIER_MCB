@@ -13,19 +13,27 @@ Borrowed and inverted: FunSearch (external evaluator picks winners), MAP-Elites 
 elites + a diversity gate), Reflexion / Self-Refine (failures become the next prompt AND a bounded, targeted
 repair of the single broken field), Novelty Search / prior-art gate (a graded verdict over claim+name+
 rationale+world-test+patch-intent, never "absolute novelty"). Fully opt-in: no `llm`, no behaviour change.
+
+With a sampling-aware provider (a local model, see `local_llm`) each round first runs a DIVERGENT phase
+(`llm_divergence`: anti-mode, hot independent persona calls, verbalized-probability intents, denial constraints,
+novelty rejection, niche-aware selection) and then one COOL convergent call per selected intent; the candidates
+it yields go through exactly the same gates and execution as before.
 """
 from __future__ import annotations
 import os
 import sys
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from .generators import Candidate, breakable
 from .qd import QDArchive
-from .llm import parse_candidates
+from .llm import parse_candidates, call_llm
+from .llm_divergence import (DivergenceConfig, Intent, build_denial_set, calibrated_mode_near, converge_block,
+                             diverge_round, elicit_mode, mean_pairwise_distance, resolve_divergence)
 from .patches import (parse_unified_diff, validate_patch_paths, PatchTransaction,
                       patch_substance_evidence)
 from .runner import CommandRunner, scrubbed_env
+from .mode_box import declare_mode, mode_distance, MODE_ECHO, NEAR_MODE
 
 _SYSTEM = ("You are an inventive but rigorous engineer. Break a hidden assumption the standard solutions share, "
            "and PROVE it with a failing test then a minimal patch. Reply ONLY with a JSON array of candidates.")
@@ -617,7 +625,8 @@ def _repo_block(problem: str, repo_root: Optional[str], max_modules: int = 8, ma
 
 # ── the prompt (every round carries archive elites + failures + verifier tail + prior-art + forbidden cells) ──
 def _build_prompt(problem, pack, archive, failures, verifier_tail, prior_art_warn, forbidden, samples,
-                  memory_block: str = "", repo_block: str = "") -> str:
+                  memory_block: str = "", repo_block: str = "", denial_block: str = "",
+                  intent_block: str = "") -> str:
     asms = ", ".join(a.name for a in breakable(pack)) or "—"
     fams = ", ".join(pack.known_families[:8]) or "—"
     elites = "; ".join(f"{c.name} (q={q})" for _c, q, c in archive.elites()[:5]) or "none yet"
@@ -641,7 +650,12 @@ def _build_prompt(problem, pack, archive, failures, verifier_tail, prior_art_war
         L.append(memory_block)
     if repo_block:                                   # the real, importable symbols of the target repo
         L.append(repo_block)
-    L += [f"\nReturn {samples} DIFFERENT candidates as a JSON array. {_SCHEMA_HINT}",
+    if denial_block:                                 # the declared mode + ideas rejected in earlier sessions
+        L.append(denial_block)
+    if intent_block:                                 # convergent call: develop ONE intent of the divergent phase
+        L.append(intent_block)
+    L += [f"\nReturn {samples} DIFFERENT candidates as a JSON array. {_SCHEMA_HINT}" if samples != 1 else
+          f"\nReturn 1 candidate as a JSON array. {_SCHEMA_HINT}",
           "Each must break a DIFFERENT assumption and include a failing test_patch (real assertion, not a "
           "broken import) plus an implementation_patch that changes real source — not one that skips the test.",
           "Also give baseline_patch: the strongest KNOWN FAMILY applied to the same code. A candidate whose test the "
@@ -677,11 +691,19 @@ class LLMSearchResult:
     baseline_separated_count: int = 0     # ... where the known family stayed RED (the idea is separated from it)
     rebrand_count: int = 0
     duplicates_rejected: int = 0
+    mode_echoes_rejected: int = 0         # candidates that only echo / vary the declared default answers
     json_repairs: int = 0
     test_repairs: int = 0
     impl_repairs: int = 0
     rejected: List[Dict] = field(default_factory=list)    # [{name, reason}]
     reflections: List[str] = field(default_factory=list)
+    divergence: Dict = field(default_factory=lambda: {"enabled": False})   # divergent-phase telemetry
+    provider_error: str = ""              # the provider's last transport error (e.g. the local server is down)
+
+    def candidate_spread(self) -> Optional[float]:
+        """Mean pairwise semantic distance of the non-rebrand candidates — how far apart the proposals are."""
+        return mean_pairwise_distance([f"{c.name} {c.candidate.negation}" for c in self.candidates
+                                       if not c.evidence.get("rebrand")])
 
     def best(self) -> Optional[LLMCandidate]:
         return max(self.candidates, key=lambda c: c.score) if self.candidates else None
@@ -699,6 +721,7 @@ class LLMSearchResult:
             "green_final": self.green_final_count, "rebrands_blocked": self.rebrand_count,
             "baseline_checked": self.baseline_checked_count, "baseline_separated": self.baseline_separated_count,
             "duplicates_rejected": self.duplicates_rejected,
+            "mode_echoes_rejected": self.mode_echoes_rejected,
             "repairs": {"json": self.json_repairs, "test": self.test_repairs, "impl": self.impl_repairs},
             "archive_coverage": self.archive.coverage(), "qd_score": self.archive.qd_score(),
             "best": None if not b else {
@@ -711,6 +734,9 @@ class LLMSearchResult:
                 "prior_art_checked_sources": b.evidence.get("prior_art_checked_sources", []),
                 "prior_art_failed_sources": b.evidence.get("prior_art_failed_sources", [])},
             "rejected_reasons": self.rejected[-12:],
+            "candidate_spread": self.candidate_spread(),
+            "divergence": dict(self.divergence),
+            "provider_error": self.provider_error,
         }
 
     def markdown(self) -> str:
@@ -721,6 +747,7 @@ class LLMSearchResult:
              f"- materialized: {self.materialized_count} · RED_ASSERTION: {self.red_assertion_count} · "
              f"RED_COLLECTION: {self.red_collection_count} · GREEN-final: {self.green_final_count} · "
              f"rebrands blocked: {self.rebrand_count} · duplicates rejected: {self.duplicates_rejected} · "
+             f"mode echoes rejected: {self.mode_echoes_rejected} · "
              f"separated from known family: {self.baseline_separated_count}/{self.baseline_checked_count}",
              f"- archive coverage: {self.archive.coverage()} cells · QD-score {self.archive.qd_score()}"]
         if b:
@@ -730,6 +757,15 @@ class LLMSearchResult:
             L.append(f"- BEST (external score {b.score}, {b.verdict}): «{b.name}» — green={b.evidence.get('green_final')}"
                      f", red={b.evidence.get('red_kind')}, prior_art={scoped_verdict}/{scope}")
             L.append(f"  components: " + " · ".join(f"{k}={v}" for k, v in c.items()))
+        dv = self.divergence
+        if dv.get("enabled"):
+            rej = " · ".join(f"{k}={v}" for k, v in sorted(dv.get("rejections", {}).items())) or "none"
+            L.append(f"- divergent phase: mode={dv.get('mode_source')} ({len(dv.get('mode_answers', []))} default "
+                     f"answers denied) · intents generated/selected: {dv.get('intents_generated', 0)}/"
+                     f"{dv.get('intents_selected', 0)} · rejected: {rej} · "
+                     f"fallback rounds: {dv.get('fallback_rounds', 0)} · candidate spread: {self.candidate_spread()}")
+        if self.provider_error:
+            L.append(f"- ⚠ provider error (samples discarded): {self.provider_error}")
         if self.reflections:
             L.append("- failure reflections: " + " | ".join(self.reflections[-5:]))
         return "\n".join(L)
@@ -743,12 +779,23 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                          keep_failed: bool = False, dry_run: bool = False, timeout: int = 60,
                          weights: Optional[Dict[str, float]] = None,
                          max_per_assumption: int = 3, max_per_cell: int = 2,
-                         memory_router=None, mutation_budget: int = 4) -> LLMSearchResult:
-    """Run the LLM-in-the-loop search. The LLM is called once per round (budget // samples_per_round rounds);
-    each candidate is prior-art gated, diversity gated, optionally MATERIALIZED (test RED → patch GREEN, in a
-    rollback-safe transaction) and scored by execution into readable components. Bounded repair fixes a broken
-    JSON/test/impl field instead of discarding the whole proposal. Opt-in: an `llm` provider is required; when
-    omitted it is resolved from the process-wide default (`set_default_llm` / OUTLIER_MCB_LLM)."""
+                         memory_router=None, mutation_budget: int = 4,
+                         divergence=None, mode: Optional[Sequence[str]] = None,
+                         memory=None) -> LLMSearchResult:
+    """Run the LLM-in-the-loop search over budget // samples_per_round rounds. Each candidate is prior-art gated,
+    diversity gated, optionally MATERIALIZED (test RED → patch GREEN, in a rollback-safe transaction) and scored by
+    execution into readable components. Bounded repair fixes a broken JSON/test/impl field instead of discarding
+    the whole proposal. Opt-in: an `llm` provider is required; when omitted it is resolved from the process-wide
+    default (`set_default_llm` / OUTLIER_MCB_LLM).
+
+    `divergence` selects how each round's candidates are PROPOSED: None (auto) runs the divergent → convergent
+    phase (`llm_divergence`) exactly when the provider declares `supports_sampling` (the local HTTP providers) and
+    the legacy single call otherwise; True / a mapping / a DivergenceConfig forces it on; False forces it off.
+    The divergent phase makes `diverge_calls` + one call per selected intent per round (+1 mode call once).
+    `mode` declares your default answers (anti-mode); in the divergent phase they are denied and every intent must
+    leave them, and without it the model is asked for its own (DivergenceConfig.auto_mode). `memory` (a
+    FailureStore, a JSON path, or None → OUTLIER_MCB_MEMORY) feeds ideas rejected in earlier sessions into the
+    prompt as denials and records this run's rebrands, mode echoes and non-separated candidates for the next."""
     if llm is None:                                   # GENERATIVITY: draw the content source from the default
         from .llm import default_llm
         llm = default_llm()
@@ -772,6 +819,36 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
     rounds = max(1, budget // max(1, samples_per_round))
     repo_block = _repo_block(problem, repo.root if (repo is not None and getattr(repo, "grounded", False)) else None)
 
+    from .failure_feedback import resolve_store
+    store = resolve_store(memory)
+    remembered = store.rejected_ideas(pack.name, k=8) if store is not None else []
+    recorded_deaths = 0
+    dead_ideas: List[str] = []                        # "name: claim" of every candidate that died this run
+    cfg = resolve_divergence(divergence, llm)
+    mode_map, mode_source = None, "none"
+    if mode:
+        mode_map, mode_source = declare_mode(problem, list(mode)), "declared"
+    elif cfg is not None and cfg.auto_mode:
+        mode_map, calls = elicit_mode(problem, pack, llm, cfg)
+        res.llm_call_count += calls
+        mode_source = "elicited" if mode_map is not None else "none"
+    mode_answers = list(mode_map.answers) if mode_map is not None else []
+    mode_near = calibrated_mode_near(mode_map) if mode_map is not None else None
+    if cfg is not None:
+        res.divergence = {"enabled": True, "mode_source": mode_source, "mode_answers": mode_answers,
+                          "intents_generated": 0, "intents_selected": 0, "rejections": {}, "fallback_rounds": 0,
+                          "personas": [], "intents": []}
+    denial_block = _legacy_denial_block(mode_answers, remembered)
+
+    def record_death(cd: Dict, cand: Candidate, verdict: str, reason: str) -> None:
+        nonlocal recorded_deaths
+        dead_ideas.append(f"{cand.name}: {cd.get('claim', '')}")
+        if store is not None:
+            ba = str(cd.get("broken_assumption", "")).strip()
+            if store.record(pack.name, f"{cand.name}: {cd.get('claim', '')}", verdict, assumption=ba,
+                            axis=pack.dimension_of.get(ba, ""), reason=reason) is not None:
+                recorded_deaths += 1
+
     for _r in range(rounds):
         div.reset_round()
         prior_warn = "; ".join(f"{c.name}:{c.verdict}" for c in res.candidates[-4:]
@@ -782,12 +859,18 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                 mem_block = memory_router.plan(problem).prompt_block
             except Exception:
                 mem_block = ""
-        prompt = _build_prompt(problem, pack, archive, failures, verifier_tail, prior_warn,
-                               div.forbidden_assumptions, samples_per_round, memory_block=mem_block,
-                               repo_block=repo_block)
-        completions = llm.complete(prompt, system=_SYSTEM, n=samples_per_round)
-        res.llm_call_count += 1
-        for comp in completions:
+        prompt_args = (problem, pack, archive, failures, verifier_tail, prior_warn, div.forbidden_assumptions)
+        if cfg is None:
+            prompt = _build_prompt(*prompt_args, samples_per_round, memory_block=mem_block, repo_block=repo_block,
+                                   denial_block=denial_block)
+            completions = [(c, None) for c in llm.complete(prompt, system=_SYSTEM, n=samples_per_round)]
+            res.llm_call_count += 1
+        else:
+            completions = _divergent_completions(
+                res, llm, cfg, prompt_args, round_index=_r, samples=samples_per_round, mode_map=mode_map,
+                mode_near=mode_near, mode_answers=mode_answers, dead_ideas=dead_ideas, remembered=remembered,
+                prompt_kw={"memory_block": mem_block, "repo_block": repo_block})
+        for comp, intent in completions:
             pr = parse_candidates(comp)
             # JSON repair (§5): if a completion yielded nothing valid, ask for a corrected JSON array
             tries = 0
@@ -813,12 +896,27 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                             "prior_art_checked_sources": pa_ev.get("checked_sources", []),
                             "prior_art_failed_sources": pa_ev.get("failed_sources", []),
                             "has_patch": bool(cd.get("test_patch") or cd.get("implementation_patch"))}
+                    if intent is not None:
+                        ev_r["intent"] = _intent_evidence(intent)
                     res.candidates.append(LLMCandidate(name=cand.name, score=llm_evidence_score(ev_r, weights),
                                                        verdict=verdict, candidate=cand, evidence=ev_r))
+                    record_death(cd, cand, "RENAMED", f"rebrand of prior art ({verdict})")
                     failures.append(f"{cand.name}: rebrand of prior art")
                     res.rejected.append({"name": cand.name, "reason": "rebrand of prior art"})
                     res.reflections.append(f"{cand.name} → rebrand of prior art")
                     continue
+                # mode gate (anti-mode): a candidate that keeps the declared default answer's mechanism, or is a
+                # component swap of it, is INSIDE_THE_BOX however it is phrased — it never reaches execution.
+                if mode_map is not None and mode_map.answers:
+                    md = mode_distance(f"{cand.name}: {cd.get('claim', '')}", mode_map, near=mode_near)
+                    if md.verdict in (MODE_ECHO, NEAR_MODE):
+                        res.mode_echoes_rejected += 1
+                        reason = f"{md.verdict} of your default answer: {md.reason}"
+                        record_death(cd, cand, md.verdict, reason)
+                        failures.append(f"{cand.name}: {md.verdict}")
+                        res.rejected.append({"name": cand.name, "reason": reason})
+                        res.reflections.append(f"{cand.name} → {md.verdict}")
+                        continue
                 # diversity gate (§7): reject near-duplicates / over-crowded assumptions/cells
                 accepted, drop_reason = div.check(cd, cand, archive)
                 if not accepted:
@@ -844,6 +942,8 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                     "diversity": div.diversity_component(cd, cand, archive),
                     "cell_new": archive.cell_of(cand) not in archive.grid,
                 }
+                if intent is not None:
+                    ev["intent"] = _intent_evidence(intent)
                 tel: Dict = {}
                 if materialize and repo is not None and repo.grounded and cd.get("test_patch"):
                     mat = _materialize(cd, repo.root, runner=runner, timeout=timeout, llm=llm,
@@ -880,7 +980,85 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
                     reason = (f"not separated: {fam} also passes the test" if ev.get("beats_baseline") is False else
                               "RED_COLLECTION not RED_ASSERTION" if ev.get("red_kind") == "RED_COLLECTION" else
                               "no GREEN / unmaterialized test" if not ev.get("green_final") else "low evidence")
+                    if ev.get("beats_baseline") is False:
+                        record_death(cd, cand, "NOT_SEPARATED", reason)
+                    else:
+                        dead_ideas.append(f"{cand.name}: {cd.get('claim', '')}")
                     failures.append(f"{cand.name}: {reason}")
                     res.rejected.append({"name": cand.name, "reason": reason})
                     res.reflections.append(f"{cand.name} → {reason}")
+    if store is not None and recorded_deaths:
+        store.save()
+    res.provider_error = _provider_error(llm)
     return res
+
+
+def _provider_error(llm) -> str:
+    """The last transport error of the provider (or of any provider a RoleRoutedLLM routes to), '' if none."""
+    providers = [llm] + [getattr(llm, "default", None)] + list(getattr(llm, "by_role", {}).values())
+    return next((str(p.last_error) for p in providers if p is not None and getattr(p, "last_error", "")), "")
+
+
+def _legacy_denial_block(mode_answers: Sequence[str], remembered: Sequence[str]) -> str:
+    """The declared default answers and the ideas rejected in earlier sessions, as one prompt block ('' when
+    there is neither — the legacy prompt is then unchanged)."""
+    lines = []
+    if mode_answers:
+        lines.append("YOUR DEFAULT ANSWERS (the box — every candidate must leave them, not vary them): "
+                     + "; ".join(a[:120] for a in mode_answers))
+    if remembered:
+        lines.append("REJECTED IN EARLIER SESSIONS (do not re-propose): " + "; ".join(i[:120] for i in remembered))
+    return "\n".join(lines)
+
+
+def _intent_evidence(intent: Intent) -> Dict:
+    return {"assumption": intent.assumption, "mechanism": intent.mechanism, "probability": intent.probability,
+            "persona": intent.persona, "novelty": intent.novelty}
+
+
+def _divergent_completions(res: LLMSearchResult, llm, cfg: DivergenceConfig, prompt_args: Tuple, *,
+                           round_index: int, samples: int, mode_map, mode_near: Optional[float],
+                           mode_answers: Sequence[str],
+                           dead_ideas: Sequence[str], remembered: Sequence[str],
+                           prompt_kw: Dict) -> List[Tuple[str, Optional[Intent]]]:
+    """One round of the divergent → convergent phase: diverge (hot, independent persona calls) into intents,
+    filter them against everything denied, then develop each selected intent with ONE cool convergent call.
+    When every intent is rejected the round falls back to the legacy single call (cool), so no round is empty."""
+    problem, pack, archive = prompt_args[0], prompt_args[1], prompt_args[2]
+    elites = [f"{c.name}: {c.negation}" for _cell, _q, c in archive.elites()[:8]]
+    denial = build_denial_set(pack, mode_answers=mode_answers, dead=list(dead_ideas)[-12:], remembered=remembered,
+                              elites=elites)
+    denial.add("already proposed in this search",
+               [f"{c.name}: {c.candidate.negation}" for c in res.candidates if not c.evidence.get("rebrand")])
+    occupied = {a for _cell, _q, c in archive.elites() for a in c.assumptions}
+    rnd = diverge_round(problem, pack, llm, cfg, denial, round_index=round_index, k=samples, mode_map=mode_map,
+                        mode_near=mode_near, occupied_assumptions=occupied,
+                        assumptions=[a.name for a in breakable(pack)])
+    res.llm_call_count += rnd.calls
+    dv = res.divergence
+    dv["intents_generated"] += len(rnd.intents)
+    dv["intents_selected"] += len(rnd.selected)
+    dv["personas"] += rnd.personas
+    for it in rnd.intents:
+        if it.status.startswith("REJECTED_"):
+            kind = it.status[len("REJECTED_"):]
+            dv["rejections"][kind] = dv["rejections"].get(kind, 0) + 1
+    dv["intents"] = (dv["intents"] + [it.as_dict() for it in rnd.intents])[-60:]
+    seed = None if cfg.seed is None else cfg.seed + 7 * (round_index + 1)
+    if not rnd.selected:
+        dv["fallback_rounds"] += 1
+        prompt = _build_prompt(*prompt_args, samples, denial_block=_legacy_denial_block(mode_answers, remembered),
+                               **prompt_kw)
+        outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=samples,
+                        role="converge", seed=seed, **cfg.converge_sampling)
+        res.llm_call_count += 1
+        return [(c, None) for c in outs]
+    completions: List[Tuple[str, Optional[Intent]]] = []
+    for j, intent in enumerate(rnd.selected):
+        prompt = _build_prompt(*prompt_args, 1, intent_block=converge_block(intent),
+                               denial_block=_legacy_denial_block(mode_answers, remembered), **prompt_kw)
+        outs = call_llm(llm, prompt, system=_SYSTEM, temperature=cfg.converge_temperature, n=1, role="converge",
+                        seed=None if seed is None else seed + j, **cfg.converge_sampling)
+        res.llm_call_count += 1
+        completions += [(c, intent) for c in outs]
+    return completions

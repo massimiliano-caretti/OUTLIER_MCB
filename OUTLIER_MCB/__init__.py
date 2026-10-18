@@ -284,7 +284,11 @@ from .cognitive_protocols import (CognitiveMove, CognitiveProtocolResult, scampe
 from .self_improve import propose_self_improvements, SelfImprovementReport, SelfImprovementProposal
 # ── LLM-in-the-loop: propose → prior-art gate → MATERIALIZE a failing test → run RED→GREEN → score (opt-in) ──
 from .llm import (LLMProvider, CallableLLMProvider, SubprocessLLMProvider, parse_candidates, CANDIDATE_SCHEMA,
-                  set_default_llm, reset_default_llm, default_llm)
+                  set_default_llm, reset_default_llm, default_llm, call_llm, supports_sampling)
+# ── local models: sampling-aware HTTP providers + the divergent → convergent LLM phase ──
+from .local_llm import OllamaLLMProvider, OpenAICompatibleLLMProvider, RoleRoutedLLM, ollama_embed_fn
+from .llm_divergence import (DivergenceConfig, Intent, DenialSet, parse_intents, select_intents, diverge_round,
+                             mean_pairwise_distance)
 from .runner import CommandRunner, CommandResult, UnsafeCommandError, to_argv
 from .patches import (parse_unified_diff, validate_patch_paths, apply_patch_plan, PatchPlan,
                       PatchTransaction, patch_substance_score, patch_substance_evidence, is_test_path)
@@ -583,6 +587,9 @@ __toolbox__ = [
     "propose_self_improvements", "SelfImprovementReport", "SelfImprovementProposal",
     # LLM-in-the-loop (opt-in: real generation + test/patch materialization + executable scoring)
     "LLMProvider", "CallableLLMProvider", "SubprocessLLMProvider", "parse_candidates", "CANDIDATE_SCHEMA",
+    "call_llm", "supports_sampling", "OllamaLLMProvider", "OpenAICompatibleLLMProvider", "RoleRoutedLLM",
+    "ollama_embed_fn", "DivergenceConfig", "Intent", "DenialSet", "parse_intents", "select_intents",
+    "diverge_round", "mean_pairwise_distance",
     "set_default_llm", "reset_default_llm", "default_llm",
     "CommandRunner", "CommandResult", "UnsafeCommandError", "to_argv",
     "parse_unified_diff", "validate_patch_paths", "apply_patch_plan", "PatchPlan",

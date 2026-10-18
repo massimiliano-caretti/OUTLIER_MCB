@@ -65,6 +65,20 @@ def _features(text: str) -> Dict[str, str]:
     return out
 
 
+def _request_stems(prompt: str) -> set:
+    return {_stem(w) for w in _content(prompt)}
+
+
+def _is_request_feature(stem: str, request: set) -> bool:
+    """True when EVERY word of a feature comes from the request itself ('rate limiter' for "rate-limit API
+    clients"): that is the problem being solved, not an assumption about its solution. A word counts as a request
+    word on an exact stem match or when it extends a request stem of ≥4 letters (limiter ⊃ limit — the tiny
+    stemmer does not strip every derivational suffix)."""
+    def is_request(part: str) -> bool:
+        return part in request or any(len(r) >= 4 and part.startswith(r) for r in request)
+    return all(is_request(part) for part in stem.split("_"))
+
+
 def _slug(stem: str) -> str:
     return re.sub(r"\W+", "_", stem).strip("_") or "feature"
 
@@ -112,12 +126,12 @@ def declare_mode(prompt: str, answers: Sequence[str], probabilities: Optional[Se
     probs = list(probabilities or [])
     n = len(answers)
     warnings: List[str] = []
-    prompt_stems = {_stem(w) for w in _content(prompt)}
+    prompt_stems = _request_stems(prompt)
     support: Dict[str, int] = {}
     surface: Dict[str, str] = {}
     for a in answers:
         for st, sf in _features(a).items():
-            if any(part in prompt_stems for part in st.split("_")) and "_" not in st:
+            if _is_request_feature(st, prompt_stems):
                 continue                                   # a request word is given, not assumed
             support[st] = support.get(st, 0) + 1
             surface.setdefault(st, sf)
@@ -219,8 +233,9 @@ def mode_distance(idea: str, mode: ModeMap, embedder=None, near: float = 0.55) -
     # a COMPONENT SWAP of one typical answer (redis→memcached, client→user) fools a lexical distance; catch it
     # structurally: the idea reuses a typical answer's named mechanism (an adjacent bigram) or at least half of its words.
     swap = ""
+    request = _request_stems(mode.prompt)
     for a in mode.answers:
-        fa = _features(a)
+        fa = {x: sf for x, sf in _features(a).items() if not _is_request_feature(x, request)}
         uni = {x for x in fa if "_" not in x}
         reused = [fa[x] for x in fa if "_" in x and x in feats]
         frac = len(uni & set(feats)) / len(uni) if uni else 0.0

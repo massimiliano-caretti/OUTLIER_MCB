@@ -38,6 +38,8 @@ _CAPS: List[Capability] = [
     Capability("invent runtime", "generate", "invent", "the cognitive runtime: escape the box (box_distance × survives_falsification); opt-in taste=, expand_when_stuck="),
     Capability("autonomous loop", "generate", "autonomous", "ONE composed scientific loop: incubate→invent(taste,transform)→settle(red-team,economy)→represent→disambiguate→record"),
     Capability("green-star", "generate", "green_star", "first-principles structure when no pack/examples exist"),
+    Capability("LLM open-ended search", "generate", "llm_openended_search", "propose → prior-art gate → RED→GREEN by execution; with a local model each round diverges first (anti-mode, persona intents, denial, novelty rejection) then converges"),
+    Capability("local LLM provider", "generate", "OllamaLLMProvider", "sampling-aware local model (per-call temperature/seed/min_p, raw base-model mode); OpenAICompatibleLLMProvider for llama.cpp/vLLM, RoleRoutedLLM for base-diverge/instruct-converge"),
     # ── judge / verify / honesty ───────────────────────────────────────────────────────────────────────
     Capability("judge an idea", "verify", "judge", "INSIDE_THE_BOX vs MUST_BE_AUDITED, with theorem/world-test/maturity"),
     Capability("novelty audit", "verify", "novelty_audit", "classify against real prior art: RENAMED / COLLAGE / NO_PRIOR_ART_FOUND"),

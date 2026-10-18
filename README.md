@@ -243,6 +243,41 @@ It is fully opt-in (no `llm` ⇒ nothing else changes), needs no network and no 
 untrusted model output (bad JSON, an escaping patch, a shell operator in a command). It is a disciplined search
 kernel, **not** an agent.
 
+### Local models: a divergent → convergent phase
+
+With a local model the loop can reach the levers a CLI pipe cannot: a per-call temperature, the sampler, and the
+choice between a base model and its chat version. A sampling-aware provider (`OllamaLLMProvider`,
+`OpenAICompatibleLLMProvider` for llama.cpp / vLLM / LM Studio) switches each round to a two-phase search built
+from techniques with published evidence:
+
+| step | what it does | evidence |
+|---|---|---|
+| anti-mode | one cool call asks for the model's own default answers; they are denied, and every intent and candidate must leave them (`MODE_ECHO` / `NEAR_MODE` die) | Artificial Hivemind (NeurIPS 2025) |
+| intent factorisation | short intents sampled hot (T=1.0), each developed by one cool convergent call (T=0.2) | Intent Factored Generation (ICML 2025) |
+| observations first | every divergent call writes observations, then intents built on them | PlanSearch (ICLR 2025) |
+| independent persona calls | each divergent call is a fresh context with a distant discipline lens | Deng et al. 2026; Meincke et al. 2024 |
+| verbalized sampling | intents carry a self-estimated typicality; the tail is preferred | Verbalized Sampling (2025) |
+| denial prompting | known families, the mode, this run's dead ideas and the failure memory are DO-NOT-USE constraints that grow each round | NeoCoder (NAACL 2025) |
+| novelty rejection + niches | intents near anything denied are dropped before a call is spent; survivors are picked across distinct assumptions, empty archive niches first | OMNI-EPIC (ICLR 2025), QDAIF (ICLR 2024) |
+
+```python
+llm = gsl.OllamaLLMProvider("qwen3:8b")                       # divergence turns on automatically
+# a base model for the divergent phase, the instruct model for JSON:
+llm = gsl.RoleRoutedLLM(gsl.OllamaLLMProvider("qwen3:8b"),
+                        diverge=gsl.OllamaLLMProvider("qwen3:8b-base", completion=True))
+res = gsl.llm_openended_search("invent X", llm, mode=["my default answer"], memory=".outlier_mcb/failure_memory.json")
+print(res.markdown())                                          # intents generated/selected/rejected, candidate spread
+```
+
+Without code: `OUTLIER_MCB_LLM=ollama:qwen3:8b` (optionally `OUTLIER_MCB_LLM_DIVERGE=ollama-raw:<base-model>`), or
+`python -m OUTLIER_MCB llm-search --llm ollama:qwen3:8b --problem "…"`. `OUTLIER_MCB_EMBEDDER=ollama:nomic-embed-text`
+gives the novelty filters real semantics. Truncation samplers (`min_p`, `top_k`, `top_n_sigma`) are passed through
+`DivergenceConfig(diverge_sampling=…)` but never on by default: the evidence for min_p is disputed. Plain temperature
+is a weak creativity lever on its own (Peeperkorn et al., ICCC 2024), which is why it is only one step of six.
+`divergence=False` restores the single-call path; duck-typed providers keep it by default. None of this decides what
+is novel: every candidate still faces the prior-art gate and executable settlement, and no step asks a model to
+grade creativity (LLM judges favour familiar text).
+
 ---
 
 ## Hard-problem frontier (open problems, partial certified results, never regress)

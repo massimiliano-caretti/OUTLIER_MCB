@@ -36,6 +36,32 @@ All notable changes to OUTLIER_MCB are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — local models think outside the mode: a divergent → convergent LLM phase
+- **`local_llm`** — stdlib HTTP providers for local models: `OllamaLLMProvider` (chat, or raw completion for base
+  models; `think: false` by default), `OpenAICompatibleLLMProvider` (llama.cpp, vLLM, LM Studio), and
+  `RoleRoutedLLM` (e.g. a base model for the divergent phase, the instruct model for JSON). Per-call temperature,
+  seed and samplers reach the wire; n samples are n independent requests with distinct seeds; transport failures
+  become discarded `_error` samples, never exceptions. Specs `ollama:` / `ollama-raw:` / `openai:` / `openai-raw:`
+  for `OUTLIER_MCB_LLM`, plus `OUTLIER_MCB_LLM_DIVERGE`; `OUTLIER_MCB_EMBEDDER=ollama:<model>` for semantic distance.
+- **`llm_divergence`** + `llm_openended_search(divergence=, mode=, memory=)` — anti-mode elicitation, hot independent
+  persona calls producing observation-grounded intents with verbalized probabilities, growing denial constraints,
+  novelty rejection, niche-aware selection, and one cool convergent call per intent. On automatically for
+  sampling-aware providers; existing providers keep the exact previous path. Telemetry: intents
+  generated/selected/rejected by reason, fallback rounds, `candidate_spread`.
+- A candidate that echoes or varies the declared default answers is rejected before execution
+  (`mode_echoes_rejected`) and, like rebrands and non-separated candidates, recorded in the failure memory.
+- `call_llm` forwards sampling options only to providers that accept them; `SubprocessLLMProvider` now honours
+  the temperature through `{temperature}` / `{role}` / `{seed}` argv placeholders and `OUTLIER_MCB_LLM_*` env vars.
+- CLI `llm-search`: `--llm`, `--diverge-llm`, `--divergence auto|on|off`, `--mode`, `--memory`.
+
+### Fixed
+- `mode_box`: a feature made only of request words ("rate limiter" for "rate-limit API clients") is the problem,
+  not a mechanism. It is no longer a shared feature of the mode, and reusing it is no longer a component swap.
+  Found by a live run in which every on-topic idea was branded `NEAR_MODE`.
+- The mode threshold used by the LLM loop is calibrated to the embedder (the closest pair of declared default
+  answers) instead of a fixed lexical 0.55. With semantic embedders that fixed value classed every on-topic idea
+  as a variant.
+
 ### Added — three COMPLEMENTARY discovery axes (chosen using the library on itself: it measured its own blind spots)
 Asked the library which new representation axes would add the most exploratory power, then measured empirically WHICH
 canonical sequences the current discoverer finds NO structure for — those are the real gaps. `judge` ruled the

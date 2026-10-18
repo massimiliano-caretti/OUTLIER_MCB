@@ -114,18 +114,37 @@ def cmd_self_improve(a):
 def cmd_llm_search(a):
     """LLM-in-the-loop: propose → prior-art gate → materialize a failing test → run RED→GREEN → score."""
     import json as _json
-    from .llm import SubprocessLLMProvider
+    from .llm import SubprocessLLMProvider, _llm_from_spec
     from .llm_loop import llm_openended_search
-    if not a.llm_cmd:
-        print("error: --llm-cmd is required (a CLI that reads a prompt on stdin and prints candidates as JSON)")
+    if a.llm_cmd and a.llm:
+        print("error: pass either --llm-cmd or --llm, not both")
         return
-    llm = SubprocessLLMProvider(a.llm_cmd)
+    if a.llm_cmd:
+        llm = SubprocessLLMProvider(a.llm_cmd)
+    elif a.llm:
+        llm = _llm_from_spec(a.llm)
+        if llm is None:
+            print(f"error: unrecognised --llm spec {a.llm!r} (ollama:<model>[@host] · ollama-raw:… · "
+                  "openai:<model>@<base_url> · openai-raw:… · subprocess:<command>)")
+            return
+    else:
+        print("error: --llm-cmd (a CLI reading the prompt on stdin) or --llm (e.g. ollama:qwen3:8b) is required")
+        return
+    if a.diverge_llm:
+        from .local_llm import RoleRoutedLLM
+        diverge = _llm_from_spec(a.diverge_llm)
+        if diverge is None:
+            print(f"error: unrecognised --diverge-llm spec {a.diverge_llm!r}")
+            return
+        llm = RoleRoutedLLM(llm, diverge=diverge)
     r = llm_openended_search(
         _read(a.problem) or "invent a genuinely new solution", llm,
         repo_path=a.repo_path, budget=a.budget, samples_per_round=a.samples_per_round,
         execute=a.execute, materialize=a.materialize, timeout=a.timeout,
         max_json_repairs=a.max_json_repairs, max_test_repairs=a.max_test_repairs,
-        max_impl_repairs=a.max_impl_repairs, keep_failed=a.keep_failed, dry_run=a.dry_run)
+        max_impl_repairs=a.max_impl_repairs, keep_failed=a.keep_failed, dry_run=a.dry_run,
+        divergence={"auto": None, "on": True, "off": False}[a.divergence], mode=a.mode or None,
+        memory=a.memory)
     print(_json.dumps(r.to_dict(), indent=2) if a.json else r.markdown())
 
 
@@ -264,6 +283,13 @@ def main(argv=None):
     p = sub.add_parser("self-improve"); p.add_argument("--budget", type=int, default=30); p.set_defaults(f=cmd_self_improve)
     p = sub.add_parser("llm-search"); p.add_argument("--problem"); p.add_argument("--repo-path", dest="repo_path", default=".")
     p.add_argument("--llm-cmd", dest="llm_cmd"); p.add_argument("--budget", type=int, default=30)
+    p.add_argument("--llm", help="provider spec, e.g. ollama:qwen3:8b · openai:<model>@http://localhost:8080/v1")
+    p.add_argument("--diverge-llm", dest="diverge_llm",
+                   help="provider for the divergent phase (e.g. a base model: ollama-raw:<model>)")
+    p.add_argument("--divergence", choices=("auto", "on", "off"), default="auto",
+                   help="divergent → convergent phase: auto = on for sampling-aware (local HTTP) providers")
+    p.add_argument("--mode", action="append", help="one of YOUR default answers (repeatable) — denied in the search")
+    p.add_argument("--memory", help="failure-memory JSON path (default: $OUTLIER_MCB_MEMORY)")
     p.add_argument("--samples-per-round", dest="samples_per_round", type=int, default=4)
     p.add_argument("--max-json-repairs", dest="max_json_repairs", type=int, default=0)
     p.add_argument("--max-test-repairs", dest="max_test_repairs", type=int, default=0)

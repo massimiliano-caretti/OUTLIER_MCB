@@ -19,9 +19,40 @@ from typing import Callable, Dict, List, Optional, Tuple
 
 class LLMProvider:
     """Protocol: `complete(prompt, *, system="", temperature=0.8, n=1) -> list[str]` returns up to `n`
-    candidate completions. Subclass or duck-type it."""
+    candidate completions. Subclass or duck-type it. A provider MAY also accept extra sampling keywords
+    (`role`, `seed`, `min_p`, `top_p`, `max_tokens`, …); `call_llm` forwards them only to providers that do."""
     def complete(self, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1) -> List[str]:
         raise NotImplementedError
+
+
+def _accepted_keywords(fn) -> Optional[set]:
+    """The keyword names `fn` accepts, or None when it takes **kwargs (accepts every keyword)."""
+    import inspect
+    try:
+        params = inspect.signature(fn).parameters.values()
+    except (TypeError, ValueError):
+        return set()
+    if any(p.kind is p.VAR_KEYWORD for p in params):
+        return None
+    return {p.name for p in params if p.kind in (p.KEYWORD_ONLY, p.POSITIONAL_OR_KEYWORD)}
+
+
+def call_llm(llm, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1, **options) -> List[str]:
+    """Call `llm.complete` with the protocol arguments plus every extra sampling option the provider ACCEPTS.
+    Options a provider cannot take (a duck-typed or legacy provider) are dropped, never passed — so the same call
+    site drives a sampling-aware local model and stays backward compatible with every existing provider. None
+    values are dropped too ('not set' is the provider's default, not an explicit null)."""
+    options = {k: v for k, v in options.items() if v is not None}
+    accepted = _accepted_keywords(llm.complete)
+    if accepted is not None:
+        options = {k: v for k, v in options.items() if k in accepted}
+    return llm.complete(prompt, system=system, temperature=temperature, n=n, **options)
+
+
+def supports_sampling(llm) -> bool:
+    """True when the provider declares it honours per-call temperature/role (`supports_sampling = True`) — the
+    signal that turns on the divergent/convergent search by default. Duck-typed providers stay on the legacy path."""
+    return bool(getattr(llm, "supports_sampling", False))
 
 
 class CallableLLMProvider(LLMProvider):
@@ -69,18 +100,52 @@ class SubprocessLLMProvider(LLMProvider):
     as an argv list, and shell operators (`;`, `|`, `&&`, redirection, `$(...)` …) are refused — so an LLM
     CLI invocation cannot smuggle in a second command. Pass extra args inline (`"my-llm --model x"`); for a
     real pipeline, wrap it in your own script and point the command at that script.
+
+    SAMPLING: a CLI cannot be handed a temperature generically, so it is offered two ways. (1) Placeholders —
+    an argv token may contain `{temperature}`, `{role}` or `{seed}` (e.g. `"llama-cli -m m.gguf --temp
+    {temperature}"`), substituted per call AFTER tokenisation (a value can never become a new token). (2) The
+    environment — every call exports OUTLIER_MCB_LLM_TEMPERATURE, OUTLIER_MCB_LLM_ROLE and, when set,
+    OUTLIER_MCB_LLM_SEED plus OUTLIER_MCB_LLM_<OPTION> for each extra sampling option, for wrapper scripts.
+    `supports_sampling` stays False: whether the CLI honours them is up to the command.
     """
+    _PLACEHOLDERS = ("temperature", "role", "seed")
+
     def __init__(self, command: str, timeout: int = 120, allow_shell_operators: bool = False):
         self.command = command
         self.timeout = timeout
+        self.allow_shell_operators = allow_shell_operators
         from .runner import CommandRunner
         self._runner = CommandRunner(allow_shell_operators=allow_shell_operators, default_timeout=timeout)
 
-    def complete(self, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1) -> List[str]:
+    def _call_argv_env(self, values: Dict[str, object]) -> Tuple[List[str], Dict[str, str]]:
+        """The argv (placeholders substituted token by token) and the environment for one call. Raises
+        UnsafeCommandError when the command string contains shell operators."""
+        from .runner import to_argv
+        argv = to_argv(self.command, allow_shell_operators=self.allow_shell_operators)
+        for name in self._PLACEHOLDERS:
+            token = "{" + name + "}"
+            text = "" if values.get(name) is None else str(values[name])
+            argv = [a.replace(token, text) for a in argv]
+        env = dict(os.environ)
+        for key, value in values.items():
+            if value is not None:
+                env["OUTLIER_MCB_LLM_" + re.sub(r"[^A-Z0-9]+", "_", str(key).upper())] = str(value)
+        return argv, env
+
+    def complete(self, prompt: str, *, system: str = "", temperature: float = 0.8, n: int = 1,
+                 role: Optional[str] = None, seed: Optional[int] = None, **sampling) -> List[str]:
+        from .runner import UnsafeCommandError
         full = (system + "\n\n" + prompt) if system else prompt
         out = []
-        for _ in range(max(1, n)):
-            r = self._runner.run(self.command, input=full, timeout=self.timeout)
+        for i in range(max(1, n)):
+            values = {"temperature": temperature, "role": role or "",
+                      "seed": None if seed is None else int(seed) + i, **sampling}
+            try:
+                argv, env = self._call_argv_env(values)
+            except UnsafeCommandError as e:        # refused before launch, reported like any failed sample
+                out.append(json.dumps({"_error": str(e)}))
+                continue
+            r = self._runner.run(argv, input=full, timeout=self.timeout, env=env)
             if r.error and not r.stdout:
                 out.append(json.dumps({"_error": r.error}))
             else:
@@ -111,6 +176,7 @@ def reset_default_llm() -> None:
 
 
 _ENV_VAR_LLM = "OUTLIER_MCB_LLM"
+_ENV_VAR_LLM_DIVERGE = "OUTLIER_MCB_LLM_DIVERGE"
 _ENV_LLM_CACHE: Dict[str, Optional[LLMProvider]] = {}
 
 
@@ -118,6 +184,8 @@ def _llm_from_spec(spec: str) -> Optional[LLMProvider]:
     """Build the provider a spec names, or None for 'no LLM (template path)'. Recognised:
       '' / 'none'                → None (deterministic template path)
       'subprocess:<command>'     → SubprocessLLMProvider(<command>)  (no shell; operators refused)
+      'ollama:<model>[@<host>]' / 'ollama-raw:…'          → local_llm.OllamaLLMProvider (chat / raw completion)
+      'openai:<model>@<base_url>' / 'openai-raw:…'         → local_llm.OpenAICompatibleLLMProvider
     An unknown scheme resolves to None (never a silent wrong model)."""
     key = spec.lower()
     if not spec or key == "none":
@@ -125,18 +193,28 @@ def _llm_from_spec(spec: str) -> Optional[LLMProvider]:
     if key.startswith("subprocess:"):
         command = spec.split(":", 1)[1].strip()
         return SubprocessLLMProvider(command) if command else None
-    return None
+    from .local_llm import provider_from_spec
+    return provider_from_spec(spec)
 
 
 def _llm_from_env() -> Optional[LLMProvider]:
-    """Resolve OUTLIER_MCB_LLM, opt-in and CACHED by spec (a subprocess provider is built once, not per call).
+    """Resolve OUTLIER_MCB_LLM, opt-in and CACHED by spec (a provider is built once, not per call). When
+    OUTLIER_MCB_LLM_DIVERGE also names a provider (typically a BASE model, e.g. 'ollama-raw:<model>'), the result
+    routes the divergent phase to it and everything else to OUTLIER_MCB_LLM (local_llm.RoleRoutedLLM).
     Unset ⇒ None ⇒ template path (determinism by default preserved)."""
     spec = os.environ.get(_ENV_VAR_LLM, "").strip()
     if not spec or spec.lower() == "none":
         return None
-    if spec not in _ENV_LLM_CACHE:
-        _ENV_LLM_CACHE[spec] = _llm_from_spec(spec)
-    return _ENV_LLM_CACHE[spec]
+    diverge_spec = os.environ.get(_ENV_VAR_LLM_DIVERGE, "").strip()
+    key = f"{spec}\x00{diverge_spec}"
+    if key not in _ENV_LLM_CACHE:
+        provider = _llm_from_spec(spec)
+        diverge = _llm_from_spec(diverge_spec) if (provider is not None and diverge_spec) else None
+        if diverge is not None:
+            from .local_llm import RoleRoutedLLM
+            provider = RoleRoutedLLM(provider, diverge=diverge)
+        _ENV_LLM_CACHE[key] = provider
+    return _ENV_LLM_CACHE[key]
 
 
 def default_llm() -> Optional[LLMProvider]:
