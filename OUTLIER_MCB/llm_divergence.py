@@ -63,6 +63,16 @@ _DIVERGE_SYSTEM = ("Divergent phase. Generate genuinely different directions, no
 _MODE_SYSTEM = ("Be candid and conventional: state what you would actually answer by default, not what sounds "
                 "original. Use the requested line format only.")
 
+# ONE definition of "too close" for the whole search: an intent or candidate nearer than this to a known, denied or
+# default text is a variant of it. Measured with nomic-embed-text and bge-m3: paraphrases and component variants of a
+# default answer sat at 0.25–0.29 from it, genuinely different mechanisms on the same topic at 0.33–0.52, and the
+# default answers themselves 0.23–0.65 apart. Earlier the mode filter derived its threshold from the closest pair of
+# default answers; when the defaults were different KINDS of mechanism (a CDN's architecture / eviction / TTL /
+# routing / protocol, closest pair 0.43) that threshold rejected 11 of 15 clearly new intents. Distance cannot separate
+# a loose paraphrase from a new mechanism in the overlap band; mode_box's structural rules (shared features,
+# component swap) and the later prior-art gate cover what a fixed threshold misses.
+VARIANT_DISTANCE = 0.25
+
 # rejection kinds (the status of a rejected intent is f"REJECTED_{kind}")
 NEAR_KNOWN, MODE_ECHO_KIND, DUPLICATE = "NEAR_KNOWN", "MODE", "DUPLICATE"
 SELECTED, SURPLUS = "SELECTED", "SURPLUS"
@@ -78,13 +88,17 @@ class DivergenceConfig:
     converge_temperature: float = 0.2
     diverge_sampling: Optional[Dict] = None     # None = AUTO_DIVERGE_SAMPLING ∩ what the provider honours;
     converge_sampling: Optional[Dict] = None    # an explicit dict (e.g. {"min_p": 0.05}) is forwarded as given
-    novelty_min_distance: float = 0.25          # intents nearer than this to a known/denied text are discarded
+    novelty_min_distance: float = VARIANT_DISTANCE   # nearer than this to a known/denied/default text = a variant
     tail_probability: float = 0.35              # verbalized p above this = the model's own mode → ranked last
     auto_mode: bool = True                      # elicit the model's default answers when none are declared
     mode_answers: int = 5
     personas: Tuple[str, ...] = DEFAULT_PERSONAS
     seed: Optional[int] = 0                     # per-call seeds derive from it; None = unseeded sampling
     max_denials_in_prompt: int = 12
+    # ablation switches — every technique can be turned off on its own to measure what it contributes
+    observations_first: bool = True             # PlanSearch: observations before intents
+    verbalized_tail: bool = True                # ask for p and prefer the tail when selecting
+    denial_in_prompt: bool = True               # list the denied texts in the prompt (filtering is separate)
 
     def __post_init__(self):
         if self.diverge_calls < 1 or self.intents_per_call < 1:
@@ -160,8 +174,8 @@ class Intent:
 
 # ── parsing (tolerant: line format first-class, JSON accepted, garbage ignored) ──
 _NUM = r"([0-9]*\.?[0-9]+)\s*(%?)"
-_INTENT_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])?\s*INTENT\s*[:\-]\s*(?P<a>.+?)\s*\|\|\s*(?P<m>.+?)"
-                        r"(?:\s*\|\|\s*p\s*[=:≈~]?\s*" + _NUM + r")?\s*$", re.IGNORECASE)
+_INTENT_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])?\s*INTENT\s*[:\-]\s*(?P<body>.+?)\s*$", re.IGNORECASE)
+_P_FIELD_RE = re.compile(r"^p\s*[=:≈~]?\s*" + _NUM + r"$", re.IGNORECASE)
 _ANSWER_RE = re.compile(r"^\s*(?:[-*•]|\d+[.)])?\s*ANSWER\s*[:\-]\s*(?P<m>.+?)"
                         r"(?:\s*\|\|\s*p\s*[=:≈~]?\s*" + _NUM + r")?\s*$", re.IGNORECASE)
 
@@ -193,17 +207,34 @@ def _strip_reasoning(text: str) -> str:
     return strip_reasoning(text)
 
 
+def _intent_from_fields(body: str, persona: str) -> Intent:
+    """`<assumption> || <mechanism> || p=<p>`, tolerating the shapes models actually write: the assumption field
+    left out (`<mechanism> || p=…`, measured on more than half the lines of a 4B local model), the probability
+    left out, or a bare mechanism. A trailing `p=` field is the probability; of the rest, the last field is the
+    mechanism and the one before it the assumption."""
+    fields = [f.strip() for f in body.split("||") if f.strip()]
+    probability = None
+    if fields:
+        pm = _P_FIELD_RE.match(fields[-1])
+        if pm:
+            probability = _probability(pm.group(1), pm.group(2) or "")
+            fields = fields[:-1]
+    mechanism = _clean(fields[-1]) if fields else ""
+    assumption = _clean(fields[-2], 120) if len(fields) >= 2 else ""
+    return Intent(assumption=assumption, mechanism=mechanism, probability=probability, persona=persona)
+
+
 def parse_intents(text: str, persona: str = "", min_words: int = 3) -> List[Intent]:
     """Intents from one divergent completion. Accepts `INTENT: <assumption> || <mechanism> || p=<p>` lines (the
-    requested format, optionally numbered/bulleted) or a JSON array of {assumption, mechanism|intent, p}. A
-    mechanism shorter than `min_words` words is not a mechanism and is dropped; exact repeats are dropped."""
+    requested format, optionally numbered/bulleted, with the assumption or the probability left out) or a JSON
+    array of {assumption, mechanism|intent, p}. A mechanism shorter than `min_words` words is not a mechanism and
+    is dropped; exact repeats are dropped."""
     body = _strip_reasoning(text)
     out: List[Intent] = []
     for line in body.splitlines():
         m = _INTENT_RE.match(_unmark(line))
         if m:
-            out.append(Intent(assumption=_clean(m.group("a"), 120), mechanism=_clean(m.group("m")),
-                              probability=_probability(m.group(3), m.group(4) or ""), persona=persona))
+            out.append(_intent_from_fields(m.group("body"), persona))
     if not out:
         data = _extract_json(body)
         items = data.get("intents", []) if isinstance(data, dict) else data
@@ -285,26 +316,33 @@ def mode_prompt(problem: str, pack, k: int) -> str:
 
 
 def diverge_prompt(problem: str, pack, persona: str, denial: DenialSet, k: int, max_denials: int,
-                   assumptions: Sequence[str] = ()) -> str:
+                   assumptions: Sequence[str] = (), *, observations: bool = True, verbalized: bool = True) -> str:
     lines = [f"PROBLEM: {problem}",
              f"DOMAIN BOX: {getattr(pack, 'box_name', '') or '—'}",
-             f"You are {persona}. Look at the problem only through that lens.",
-             "FIRST write 3 short OBSERVATIONS about the problem that the standard solutions overlook "
-             "(one line each, prefixed 'OBSERVATION:').",
-             f"THEN propose {k} INTENTS built on those observations. Each intent breaks ONE hidden assumption and "
-             "states, in one sentence, the concrete mechanism that becomes possible once it is broken.",
-             f"ASSUMPTIONS YOU MAY BREAK (or name a NEW hidden one): {', '.join(assumptions) or '—'}"]
+             f"You are {persona}. Look at the problem only through that lens."]
+    if observations:
+        lines += ["FIRST write 3 short OBSERVATIONS about the problem that the standard solutions overlook "
+                  "(one line each, prefixed 'OBSERVATION:').",
+                  f"THEN propose {k} INTENTS built on those observations. Each intent breaks ONE hidden assumption "
+                  "and states, in one sentence, the concrete mechanism that becomes possible once it is broken."]
+    else:
+        lines.append(f"Propose {k} INTENTS. Each intent breaks ONE hidden assumption and states, in one sentence, "
+                     "the concrete mechanism that becomes possible once it is broken.")
+    lines.append(f"ASSUMPTIONS YOU MAY BREAK (or name a NEW hidden one): {', '.join(assumptions) or '—'}")
     denied = denial.prompt_lines(max_denials)
     if denied:
         lines.append("DO NOT USE any of these (already your default answer, already dead, or already known — an "
                      "intent close to any of them is discarded unread):")
         lines += denied
-    lines += ["For each intent estimate p = the probability that a typical expert would propose it. Sample from the "
-              "TAILS of what you would say: most intents should have p < 0.1.",
-              "Format, one per line:",
-              "INTENT: <assumption broken> || <mechanism in one sentence> || p=<0..1>",
-              "",
-              "OBSERVATION:"]
+    if verbalized:
+        lines += ["For each intent estimate p = the probability that a typical expert would propose it. Sample from "
+                  "the TAILS of what you would say: most intents should have p < 0.1.",
+                  "Format, one per line:",
+                  "INTENT: <assumption broken> || <mechanism in one sentence> || p=<0..1>"]
+    else:
+        lines += ["Format, one per line:", "INTENT: <assumption broken> || <mechanism in one sentence>"]
+    if observations:
+        lines += ["", "OBSERVATION:"]                # primes a base model in raw completion mode
     return "\n".join(lines)
 
 
@@ -328,26 +366,6 @@ def elicit_mode(problem: str, pack, llm, config: DivergenceConfig):
     return (declare_mode(problem, answers, probs) if answers else None), 1
 
 
-def calibrated_mode_near(mode_map, embedder=None, default: float = 0.55) -> float:
-    """The distance under which an idea counts as a VARIANT of the declared mode, calibrated to the embedder.
-
-    mode_box's fixed `near` was tuned for lexical distance, where unrelated sentences sit near 1.0. A semantic
-    embedder compresses everything on one topic: measured with nomic-embed-text and bge-m3 on rate limiters,
-    paraphrases and variants of the default answers sat at 0.25–0.40 from them and genuinely different mechanisms
-    at 0.38–0.52, while the declared answers were 0.23–0.65 apart — so a fixed 0.55 branded every on-topic idea
-    a variant. The declared answers give the scale: the two CLOSEST of them (two flavours of one standard mechanism) are
-    canonical variants of each other, so an idea nearer to a default than that is at least as much a variant.
-    The threshold is min(default, closest pair). Distance alone cannot separate a loose paraphrase from a new
-    mechanism in the overlap band; mode_box's structural rules (shared features, component swap) and the later
-    prior-art gate cover what it misses. Fewer than two answers → `default`."""
-    answers = list(getattr(mode_map, "answers", []) or [])
-    if len(answers) < 2:
-        return default
-    closest = min(float(semantic_distance(a, b, embedder=embedder))
-                  for i, a in enumerate(answers) for b in answers[i + 1:])
-    return round(min(default, closest), 4)
-
-
 def niche_key(assumption: str, known: Sequence[str] = ()) -> str:
     """The archive niche an intent belongs to: the pack assumption it names (models write 'breaking
     <assumption> by …'), else its own normalised text — so phrasing does not split one niche into many."""
@@ -358,20 +376,20 @@ def niche_key(assumption: str, known: Sequence[str] = ()) -> str:
     return text
 
 
-def select_intents(intents: Sequence[Intent], denial: DenialSet, k: int, *, min_distance: float = 0.25,
+def select_intents(intents: Sequence[Intent], denial: DenialSet, k: int, *, min_distance: float = VARIANT_DISTANCE,
                    tail_probability: float = 0.35, mode_map=None, mode_near: Optional[float] = None,
                    occupied_assumptions: Iterable[str] = (), assumptions: Sequence[str] = (),
-                   embedder=None) -> List[Intent]:
+                   embedder=None, use_probability: bool = True) -> List[Intent]:
     """Filter and pick up to `k` intents; every intent gets a status. Rejected, judged on the mechanism: near a
     denied text (REJECTED_NEAR_KNOWN), an echo/variant of the declared mode (REJECTED_MODE, judged with
-    `mode_near` — by default `calibrated_mode_near`), or a duplicate of an earlier survivor
+    `mode_near` — by default the same `min_distance`), or a duplicate of an earlier survivor
     (REJECTED_DUPLICATE). Survivors are
     ranked tail-first (self-reported p ≤ `tail_probability`, lower p first, then farther from the denial set) and
     picked ROUND-ROBIN across distinct niches (`niche_key` over the pack `assumptions`), niches that do not yet own
     an archive cell first — breadth before depth."""
     from .mode_box import mode_distance, MODE_ECHO, NEAR_MODE
-    if mode_map is not None and mode_near is None:
-        mode_near = calibrated_mode_near(mode_map, embedder)
+    if mode_near is None:
+        mode_near = min_distance
     survivors: List[Intent] = []
     # novelty and duplication are judged on the MECHANISM only: the assumption is the niche (handled by the
     # round-robin below), and a shared 'break <assumption> …' prefix made distinct mechanisms read as duplicates.
@@ -396,11 +414,11 @@ def select_intents(intents: Sequence[Intent], denial: DenialSet, k: int, *, min_
     occupied = {niche_key(a, assumptions) for a in occupied_assumptions}
 
     def rank(it: Intent):
-        p = it.probability if it.probability is not None else 0.5
+        p = it.probability if (use_probability and it.probability is not None) else 0.5
         return (p > tail_probability, p, -(it.novelty or 0.0))
     by_assumption: Dict[str, List[Intent]] = {}
     for it in sorted(survivors, key=rank):
-        by_assumption.setdefault(niche_key(it.assumption, assumptions), []).append(it)
+        by_assumption.setdefault(niche_key(it.assumption or it.mechanism, assumptions), []).append(it)
     queues = sorted(by_assumption.items(), key=lambda kv: (kv[0] in occupied, rank(kv[1][0])))
     selected: List[Intent] = []
     while len(selected) < k and any(q for _a, q in queues):
@@ -431,7 +449,8 @@ def diverge_round(problem: str, pack, llm, config: DivergenceConfig, denial: Den
         persona = config.personas[(round_index * config.diverge_calls + i) % n_personas]
         seed = None if config.seed is None else config.seed + 1000 * (round_index + 1) + i
         prompt = diverge_prompt(problem, pack, persona, denial, config.intents_per_call,
-                                config.max_denials_in_prompt, assumptions)
+                                config.max_denials_in_prompt if config.denial_in_prompt else 0, assumptions,
+                                observations=config.observations_first, verbalized=config.verbalized_tail)
         outs = call_llm(llm, prompt, system=_DIVERGE_SYSTEM, temperature=config.diverge_temperature, n=1,
                         role="diverge", seed=seed, **(config.diverge_sampling or {}))
         out.calls += 1
@@ -441,7 +460,8 @@ def diverge_round(problem: str, pack, llm, config: DivergenceConfig, denial: Den
     out.selected = select_intents(out.intents, denial, k, min_distance=config.novelty_min_distance,
                                   tail_probability=config.tail_probability, mode_map=mode_map,
                                   mode_near=mode_near, occupied_assumptions=occupied_assumptions,
-                                  assumptions=assumptions, embedder=embedder)
+                                  assumptions=assumptions, embedder=embedder,
+                                  use_probability=config.verbalized_tail)
     return out
 
 

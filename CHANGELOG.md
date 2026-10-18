@@ -36,6 +36,23 @@ All notable changes to OUTLIER_MCB are documented here. The format follows
 
 ## [Unreleased]
 
+### Added — a measured A/B of the divergent phase on a real local model
+- **`evals/divergence_ab.py`**: 12 requests in different domains, three conditions (direct answer, legacy loop,
+  divergent phase) and six single-technique ablations. Each request is scored against the model's own default
+  answers, elicited once with a seed no condition shares. The metrics are automatic only: out-of-the-box rate,
+  distance from the defaults, de-duplicated count and spread. The report gives paired bootstrap 95% intervals.
+  Interrupted runs resume. Run with `python -m evals.divergence_ab` (reports in `evals/reports/divergence_ab/`).
+- New `DivergenceConfig` switches: `observations_first`, `verbalized_tail` and `denial_in_prompt`. Each technique
+  can be ablated on its own.
+- First results (qwen3.5:4b, nomic-embed-text, 12 requests):
+  - Ideas that are still variants of the default: 41% for the direct answer, 9% with the divergent phase.
+  - Divergent directions are farther from the defaults (+17%) and more varied (+21%) than direct answers.
+  - Developing them into full candidates loses that spread (−11% vs direct), and the final ideas are not
+    distinguishable from the legacy loop.
+  - Two techniques hurt on this model, with intervals excluding 0: selecting the verbalized tail, and listing the
+    denied answers in the prompt.
+  - One model and 12 requests: a large effect is detectable, a small one is not, and usefulness is not measured.
+
 ### Added — online models (Claude, OpenAI, Gemini, …) and provider-aware sampling
 - **`online_llm`** — `AnthropicLLMProvider` (Claude through the official Anthropic SDK, an optional dependency:
   `pip install anthropic` or the `claude` extra): `effort`, server-side refusal fallback on the models that support
@@ -54,6 +71,11 @@ All notable changes to OUTLIER_MCB are documented here. The format follows
   for Ollama.
 
 ### Fixed
+- One variant threshold for the whole search (`VARIANT_DISTANCE = 0.25`) replaces the mode threshold derived from
+  the closest pair of default answers. When the defaults were different kinds of mechanism (a CDN: closest pair 0.43),
+  that rule rejected 11 of 15 clearly new intents. Found by the A/B run.
+- `parse_intents` keeps `INTENT: <mechanism> || p=…` lines with the assumption field left out. A 4B local model wrote
+  more than half its lines this way, and they were silently dropped. Found by the A/B run.
 - `mode_box.mode_distance`: words right after a contrast cue ("instead of", "replaces … with", "without", "invece di",
   "senza", …) name what the idea leaves. An idea that names the box in order to negate it is no longer a component
   swap of it; a real variant still is `NEAR_MODE`. Found by a live run on a local model.

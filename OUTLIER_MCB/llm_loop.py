@@ -28,7 +28,7 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .generators import Candidate, breakable
 from .qd import QDArchive
 from .llm import parse_candidates, call_llm
-from .llm_divergence import (DivergenceConfig, Intent, build_denial_set, calibrated_mode_near, converge_block,
+from .llm_divergence import (VARIANT_DISTANCE, DivergenceConfig, Intent, build_denial_set, converge_block,
                              diverge_round, elicit_mode, mean_pairwise_distance, resolve_divergence,
                              resolve_sampling)
 from .patches import (parse_unified_diff, validate_patch_paths, PatchTransaction,
@@ -845,7 +845,7 @@ def llm_openended_search(problem: str, llm=None, repo_path: Optional[str] = None
         res.llm_call_count += calls
         mode_source = "elicited" if mode_map is not None else "none"
     mode_answers = list(mode_map.answers) if mode_map is not None else []
-    mode_near = calibrated_mode_near(mode_map) if mode_map is not None else None
+    mode_near = cfg.novelty_min_distance if cfg is not None else VARIANT_DISTANCE
     if cfg is not None:
         res.divergence = {"enabled": True, "mode_source": mode_source, "mode_answers": mode_answers,
                           "intents_generated": 0, "intents_selected": 0, "rejections": {}, "fallback_rounds": 0,

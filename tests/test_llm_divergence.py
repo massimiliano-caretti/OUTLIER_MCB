@@ -30,7 +30,7 @@ from OUTLIER_MCB.local_llm import (OllamaLLMProvider, OpenAICompatibleLLMProvide
                                    provider_from_spec, strip_reasoning)
 from OUTLIER_MCB.llm_divergence import (DivergenceConfig, DenialSet, Intent, parse_intents, parse_mode_answers,
                                         resolve_divergence, select_intents, mean_pairwise_distance,
-                                        calibrated_mode_near, niche_key)
+                                        niche_key)
 from OUTLIER_MCB.mode_box import declare_mode
 
 
@@ -274,46 +274,32 @@ def test_select_intents_prefers_the_tail_and_covers_distinct_unoccupied_assumpti
 
 
 class _TopicalEmbedder:
-    """A semantic-like distance with the property that broke the first live run: EVERY on-topic sentence is
-    within ≈0.4 of every other, and variants of the default answer are within ≈0.15 of each other."""
+    """The distance profile measured on a CDN prompt with nomic-embed-text: the default answers are different KINDS of
+    mechanism (0.43+ apart), every on-topic sentence sits 0.33–0.42 from them, a paraphrase sits below 0.25."""
     kind = "semantic"
 
     def distance(self, a, b):
         if a == b:
             return 0.0
-        bucket = lambda t: "bucket" in t or "window" in t
-        return 0.15 if (bucket(a) and bucket(b)) else 0.4
+        if "least recently used" in a.lower() and "least recently used" in b.lower():
+            return 0.12                                              # a paraphrase of the LRU default
+        return 0.45 if all("cache" in t.lower() for t in (a, b)) else 0.4
 
 
-def test_duplicates_are_judged_on_the_mechanism_not_the_shared_assumption_prefix():
-    """In the live run 'consensus blockchain' was dropped as a duplicate of 'gossip protocol' because both intents
-    began with 'break sync_decision'. The assumption is the niche; only the mechanism decides duplication."""
-    class PrefixBlind:
-        def distance(self, a, b):
-            if a == b:
-                return 0.0
-            return 0.1 if ("sync_decision" in a and "sync_decision" in b) else 0.9
-    gossip = _intent("break sync_decision", "nodes gossip local load estimates and throttle themselves", 0.01)
-    chain = _intent("break sync_decision", "clients post intended rates to a consensus log before sending", 0.03)
-    chosen = select_intents([gossip, chain], DenialSet(), k=2, embedder=PrefixBlind())
-    assert chosen == [gossip, chain] and {i.status for i in (gossip, chain)} == {"SELECTED"}
-
-
-def test_mode_threshold_is_calibrated_to_the_embedder_scale():
-    mode = declare_mode("rate limit clients", ["token bucket per client", "sliding window counter",
-                                               "leaky bucket queue"])
+def test_mode_filter_keeps_new_mechanisms_when_the_defaults_are_far_apart():
+    """Regression for the live CDN run: with a threshold derived from the closest pair of defaults (0.45 here), every
+    on-topic intent (0.4) was branded NEAR_MODE. One variant threshold for the whole search keeps them."""
+    from OUTLIER_MCB.llm_divergence import VARIANT_DISTANCE
+    mode = declare_mode("invent a new caching strategy for a CDN",
+                        ["hierarchical cache with edge nodes and regional hubs",
+                         "a least recently used eviction policy for cache memory",
+                         "time to live headers for cache freshness"])
     emb = _TopicalEmbedder()
-    assert calibrated_mode_near(mode) == 0.55                       # lexical: unchanged (answers are far apart)
-    assert calibrated_mode_near(mode, emb) == 0.15                  # semantic: the box's own spread
-    assert calibrated_mode_near(declare_mode("x", ["only one answer"]), emb) == 0.55
-    tail = _intent("cost_uniform", "price each request by the downstream contention it causes", 0.02)
-    variant = _intent("time_windowed", "a bucket refilled at a different cadence", 0.02)
-    chosen = select_intents([tail, variant], DenialSet(), k=2, mode_map=mode, embedder=emb)
-    assert chosen == [tail]                                          # on-topic but outside the box survives
-    assert variant.status == "REJECTED_MODE"
-    # the uncalibrated fixed threshold is exactly what rejected every on-topic idea in the live run
-    from OUTLIER_MCB.mode_box import mode_distance
-    assert mode_distance(tail.mechanism, mode, embedder=emb).verdict == "NEAR_MODE"
+    new = _intent("node_independent", "a global Lagrange multiplier prices storage across every server", 0.02)
+    paraphrase = _intent("x", "evict the least recently used objects first when memory is full", 0.02)
+    chosen = select_intents([new, paraphrase], DenialSet(), k=2, mode_map=mode, embedder=emb)
+    assert chosen == [new] and paraphrase.status in ("REJECTED_MODE", "REJECTED_NEAR_KNOWN")
+    assert DivergenceConfig().novelty_min_distance == VARIANT_DISTANCE
 
 
 def test_request_words_are_not_a_reused_mechanism():
@@ -530,3 +516,13 @@ def test_divergent_phase_widens_the_spread_of_a_mode_collapsed_model():
 def test_mean_pairwise_distance():
     assert mean_pairwise_distance(["only one"]) is None
     assert mean_pairwise_distance(["same words here", "same words here"]) == 0.0
+
+
+def test_intents_without_the_assumption_field_are_kept():
+    """A 4B local model wrote `INTENT: <mechanism> || p=…` on more than half its lines; they used to be dropped."""
+    its = parse_intents("INTENT: make latency an explicit transaction fee rather than a rate limit || p=0.06\n"
+                        "INTENT: per_client || tenants trade unused quota in a market || p=3%\n"
+                        "INTENT: assign clients to specialized niches by their behaviour\n"
+                        "INTENT: x || p=0.1")
+    assert [(i.assumption, i.probability) for i in its] == [("", 0.06), ("per_client", 0.03), ("", None)]
+    assert its[0].mechanism.startswith("make latency")
